@@ -1225,6 +1225,7 @@ PDC_Server_checkpoint()
     pdc_cont_hash_table_entry_t *cont_head;
     int n_entry, metadata_size = 0, region_count = 0, n_region, n_objs, n_write_region = 0, n_kvtag, key_len;
     uint32_t          hash_key;
+    uint32_t          checkpoint_server_count;
     HashTablePair     pair;
     char              checkpoint_file[ADDR_MAX], checkpoint_file_local[ADDR_MAX], cmd[4096];
     HashTableIterator hash_table_iter;
@@ -1268,11 +1269,18 @@ PDC_Server_checkpoint()
         LOG_INFO("Checkpoint file [%s]\n", checkpoint_file);
 
     // initialize BULKI structure - estimate initial capacity
-    checkpoint_bulki = BULKI_init(5);
+    // Keys: version_number, checkpoint_server_count, containers, metadata_entries,
+    //       dataserver_regions, transfer_query
+    checkpoint_bulki = BULKI_init(6);
 
     // BULKI version number for validation
     BULKI_put_incremental(checkpoint_bulki, BULKI_singleton_ENTITY("version_number", PDC_STRING),
                           BULKI_ENTITY(PDC_CHECKPOINT_MAGIC_CURRENT, 1, PDC_STRING, PDC_CLS_ITEM));
+
+    // Server count at checkpoint time (N_old) for elastic restart detection
+    checkpoint_server_count = (uint32_t)pdc_server_size_g;
+    BULKI_put_incremental(checkpoint_bulki, BULKI_singleton_ENTITY("checkpoint_server_count", PDC_STRING),
+                          BULKI_ENTITY(&checkpoint_server_count, 1, PDC_UINT32, PDC_CLS_ITEM));
 
     // checkpoint containers
     n_entry = hash_table_num_entries(container_hash_table_g);
