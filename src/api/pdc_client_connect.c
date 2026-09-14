@@ -2144,8 +2144,7 @@ PDC_Client_update_metadata(pdc_metadata_t *old, pdc_metadata_t *new)
         PGOTO_ERROR(FAIL, "old or new was NULL");
 
     hash_name_value = PDC_get_hash_by_name(old->obj_name);
-    server_id       = (hash_name_value + old->time_step);
-    server_id %= pdc_server_num_g;
+    server_id       = PDC_metadata_home_rank(old->obj_name, old->time_step, pdc_server_num_g);
 
     // Debug statistics for counting number of messages sent to each server.
     debug_server_id_count[server_id]++;
@@ -2283,8 +2282,7 @@ PDC_Client_delete_metadata(char *delete_name, pdcid_t obj_delete_prop)
     in.time_step = delete_prop->time_step;
 
     hash_name_value = PDC_get_hash_by_name(delete_name);
-    server_id       = (hash_name_value + in.time_step);
-    server_id %= pdc_server_num_g;
+    server_id       = PDC_metadata_home_rank(delete_name, in.time_step, pdc_server_num_g);
 
     in.hash_value = hash_name_value;
 
@@ -2395,8 +2393,7 @@ PDC_Client_query_metadata_name_timestep(const char *obj_name, int time_step, pdc
 
     // Compute server id
     hash_name_value = PDC_get_hash_by_name(obj_name);
-    server_id       = (hash_name_value + time_step);
-    server_id %= pdc_server_num_g;
+    server_id       = PDC_metadata_home_rank(obj_name, time_step, pdc_server_num_g);
 
     *metadata_server_id = server_id;
 
@@ -2504,9 +2501,8 @@ PDC_Client_create_cont_id(const char *cont_name, pdcid_t cont_create_prop ATTRIB
     in.hash_value   = hash_name_value;
     in.cont_name    = cont_name;
 
-    // Calculate server id
-    server_id = hash_name_value;
-    server_id %= pdc_server_num_g;
+    // Calculate server id (containers have no timestep; home_rank with 0 matches hash % N)
+    server_id = PDC_metadata_home_rank(cont_name, 0, pdc_server_num_g);
 
     // Debug statistics for counting number of messages sent to each server.
     debug_server_id_count[server_id]++;
@@ -2579,8 +2575,7 @@ PDC_Client_obj_reset_dims(const char *obj_name, int time_step, int ndim, uint64_
 
     // Compute server id
     hash_name_value = PDC_get_hash_by_name(obj_name);
-    server_id       = (hash_name_value + time_step);
-    server_id %= pdc_server_num_g;
+    server_id       = PDC_metadata_home_rank(obj_name, time_step, pdc_server_num_g);
 
     // Debug statistics for counting number of messages sent to each server.
     debug_server_id_count[server_id]++;
@@ -2698,8 +2693,7 @@ PDC_Client_send_name_recv_id(const char *obj_name, uint64_t cont_id, pdcid_t obj
     in.hash_value   = hash_name_value;
 
     // Compute server id
-    server_id = (hash_name_value + in.data.time_step);
-    server_id %= pdc_server_num_g;
+    server_id = PDC_metadata_home_rank(obj_name, in.data.time_step, pdc_server_num_g);
 
     *metadata_server_id = server_id;
 
@@ -4979,9 +4973,9 @@ PDC_Client_query_container_name(const char *cont_name, uint64_t *cont_meta_id)
     struct _pdc_container_query_args lookup_args;
     hg_handle_t                      container_query_handle;
 
-    // Compute server id
+    // Compute server id (containers have no timestep; home_rank with 0 matches hash % N)
     hash_name_value = PDC_get_hash_by_name(cont_name);
-    server_id       = hash_name_value % pdc_server_num_g;
+    server_id       = PDC_metadata_home_rank(cont_name, 0, pdc_server_num_g);
 
     // Debug statistics for counting number of messages sent to each server.
     debug_server_id_count[server_id]++;
