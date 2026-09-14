@@ -52,6 +52,7 @@
 #include "pdc_client_server_common.h"
 #include "pdc_transforms_common.h"
 #include "pdc_server.h"
+#include "pdc_server_rescale.h"
 #include "pdc_server_metadata.h"
 #include "pdc_server_data.h"
 #include "pdc_timing.h"
@@ -1659,23 +1660,6 @@ done:
     if (checkpoint_bulki != NULL)
         BULKI_free(checkpoint_bulki, 1);
 
-    FUNC_LEAVE(ret_value);
-}
-
-/*
- * Elastic restart stub — full migration lands in later tasks (T5+).
- */
-perr_t
-PDC_Server_restart_elastic(int n_old, int n_new)
-{
-    FUNC_ENTER(NULL);
-
-    perr_t ret_value = FAIL;
-
-    LOG_ERROR("Elastic server restart (%d -> %d) is not implemented yet\n", n_old, n_new);
-    PGOTO_ERROR(FAIL, "Elastic server restart not implemented");
-
-done:
     FUNC_LEAVE(ret_value);
 }
 

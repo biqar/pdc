@@ -40,6 +40,7 @@
 #include "pdc_server_common.h"
 #include "pdc_server_metadata.h"
 #include "pdc_server_data.h"
+#include "pdc_server_rescale.h"
 
 #ifdef ENABLE_MPI
 #include "mpi.h"
@@ -154,17 +155,6 @@ perr_t PDC_Server_checkpoint();
  * \return Non-negative on success/Negative on failure
  */
 perr_t PDC_Server_get_checkpoint_server_count(const char *filename, int n_new, uint32_t *n_old_out);
-
-/**
- * Restart with a different server count than the checkpoint (elastic).
- * Stub until migration is implemented.
- *
- * \param n_old [IN] Server count at checkpoint time
- * \param n_new [IN] Current server MPI size
- *
- * \return Non-negative on success/Negative on failure
- */
-perr_t PDC_Server_restart_elastic(int n_old, int n_new);
 
 /**
  * ***********
