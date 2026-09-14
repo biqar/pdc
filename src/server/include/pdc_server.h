@@ -142,6 +142,31 @@ perr_t PDC_Server_set_close(void);
 perr_t PDC_Server_checkpoint();
 
 /**
+ * Read checkpoint_server_count (N_old) from a checkpoint file.
+ *
+ * If the field is missing, logs an error and sets *n_old_out = n_new
+ * (same-N path only; elastic rescale unsupported for that checkpoint).
+ *
+ * \param filename [IN]   Checkpoint file path
+ * \param n_new    [IN]   Current server MPI size
+ * \param n_old_out [OUT] Server count recorded at checkpoint time
+ *
+ * \return Non-negative on success/Negative on failure
+ */
+perr_t PDC_Server_get_checkpoint_server_count(const char *filename, int n_new, uint32_t *n_old_out);
+
+/**
+ * Restart with a different server count than the checkpoint (elastic).
+ * Stub until migration is implemented.
+ *
+ * \param n_old [IN] Server count at checkpoint time
+ * \param n_new [IN] Current server MPI size
+ *
+ * \return Non-negative on success/Negative on failure
+ */
+perr_t PDC_Server_restart_elastic(int n_old, int n_new);
+
+/**
  * ***********
  *
  * \param filename [IN]         File name

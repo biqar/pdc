@@ -966,20 +966,47 @@ drc_access_again:
     PDC_Server_metadata_index_init(pdc_server_size_g, pdc_server_rank_g);
 #endif
 
-    // TODO: support restart with different number of servers than previous run
-    char checkpoint_file[ADDR_MAX + sizeof(int) + 1];
+    // Discover N_old from checkpoint; support elastic restart when N differs
+    char     checkpoint_file[ADDR_MAX + sizeof(int) + 1];
+    char     probe_file[ADDR_MAX + sizeof(int) + 1];
+    uint32_t n_old           = (uint32_t)pdc_server_size_g;
+    int      discover_failed = 0;
+
     if (is_restart_g == 1) {
         if (strpbrk(pdc_server_tmp_dir_g, ";&|`$<>") != NULL)
             PGOTO_ERROR(FAIL, "Invalid characters in server tmp dir path");
+
         snprintf(checkpoint_file, ADDR_MAX, "%s/%d/metadata_checkpoint.%d", pdc_server_tmp_dir_g,
                  pdc_server_rank_g, pdc_server_rank_g);
+        /* Probe shard 0 for N_old so scale-up ranks without a local shard still learn N_old */
+        snprintf(probe_file, ADDR_MAX, "%s/0/metadata_checkpoint.0", pdc_server_tmp_dir_g);
 
-        ret_value = PDC_Server_restart(checkpoint_file);
-        if (ret_value != SUCCEED)
-            PGOTO_ERROR(FAIL, "Error with PDC_Server_restart");
-#ifdef PDC_ENABLE_IDIOMS
-        metadata_index_recover(pdc_server_tmp_dir_g, pdc_server_size_g, pdc_server_rank_g);
+        if (pdc_server_rank_g == 0) {
+            ret_value = PDC_Server_get_checkpoint_server_count(probe_file, pdc_server_size_g, &n_old);
+            if (ret_value != SUCCEED)
+                discover_failed = 1;
+        }
+#ifdef ENABLE_MPI
+        MPI_Bcast(&n_old, 1, MPI_UNSIGNED, 0, MPI_COMM_WORLD);
+        MPI_Bcast(&discover_failed, 1, MPI_INT, 0, MPI_COMM_WORLD);
 #endif
+        if (discover_failed)
+            PGOTO_ERROR(FAIL, "Failed to read checkpoint_server_count from [%s]", probe_file);
+
+        if (n_old == (uint32_t)pdc_server_size_g) {
+            ret_value = PDC_Server_restart(checkpoint_file);
+            if (ret_value != SUCCEED)
+                PGOTO_ERROR(FAIL, "Error with PDC_Server_restart");
+#ifdef PDC_ENABLE_IDIOMS
+            metadata_index_recover(pdc_server_tmp_dir_g, pdc_server_size_g, pdc_server_rank_g);
+#endif
+        }
+        else {
+            ret_value = PDC_Server_restart_elastic((int)n_old, pdc_server_size_g);
+            if (ret_value != SUCCEED)
+                PGOTO_ERROR(FAIL, "Error with PDC_Server_restart_elastic (%u -> %d)", n_old,
+                            pdc_server_size_g);
+        }
     }
     else {
         // We are starting a brand new server
@@ -1569,6 +1596,88 @@ region_cmp(region_list_t *a, region_list_t *b)
     int unit_size = a->ndim * sizeof(uint64_t);
 
     FUNC_LEAVE(memcmp(a->start, b->start, unit_size));
+}
+
+/*
+ * Read checkpoint_server_count (N_old) from a checkpoint BULKI file.
+ * If the field is absent, log an error and set *n_old_out = n_new.
+ */
+perr_t
+PDC_Server_get_checkpoint_server_count(const char *filename, int n_new, uint32_t *n_old_out)
+{
+    FUNC_ENTER(NULL);
+
+    perr_t        ret_value        = SUCCEED;
+    FILE *        file             = NULL;
+    BULKI *       checkpoint_bulki = NULL;
+    BULKI_Entity *count_entity     = NULL;
+
+    if (filename == NULL || n_old_out == NULL || n_new <= 0)
+        PGOTO_ERROR(FAIL, "Invalid arguments to PDC_Server_get_checkpoint_server_count");
+
+    *n_old_out = (uint32_t)n_new;
+
+    file = fopen(filename, "rb");
+    if (file == NULL)
+        PGOTO_ERROR(FAIL, "Error with fopen, filename: [%s]", filename);
+
+    /* BULKI_deserialize_from_file closes the file */
+    checkpoint_bulki = BULKI_deserialize_from_file(file);
+    file             = NULL;
+    if (checkpoint_bulki == NULL)
+        PGOTO_ERROR(FAIL, "Failed to deserialize checkpoint for server count: [%s]", filename);
+
+    count_entity =
+        BULKI_get(checkpoint_bulki, BULKI_singleton_ENTITY("checkpoint_server_count", PDC_STRING));
+    if (count_entity == NULL || count_entity->data == NULL) {
+        LOG_ERROR("checkpoint_server_count missing in [%s]; assuming N_old = N_new (%d); "
+                  "elastic rescale unsupported for this checkpoint\n",
+                  filename, n_new);
+        *n_old_out = (uint32_t)n_new;
+        PGOTO_DONE(SUCCEED);
+    }
+
+    if (count_entity->count < 1)
+        PGOTO_ERROR(FAIL, "Invalid checkpoint_server_count entity in [%s]", filename);
+
+    if (count_entity->pdc_type == PDC_UINT32) {
+        *n_old_out = *(uint32_t *)count_entity->data;
+    }
+    else if (count_entity->pdc_type == PDC_INT) {
+        int v = *(int *)count_entity->data;
+        if (v <= 0)
+            PGOTO_ERROR(FAIL, "Invalid checkpoint_server_count %d in [%s]", v, filename);
+        *n_old_out = (uint32_t)v;
+    }
+    else {
+        PGOTO_ERROR(FAIL, "Unexpected type for checkpoint_server_count in [%s]", filename);
+    }
+
+    if (*n_old_out == 0 || *n_old_out > 65536)
+        PGOTO_ERROR(FAIL, "checkpoint_server_count out of range (%u) in [%s]", *n_old_out, filename);
+
+done:
+    if (checkpoint_bulki != NULL)
+        BULKI_free(checkpoint_bulki, 1);
+
+    FUNC_LEAVE(ret_value);
+}
+
+/*
+ * Elastic restart stub — full migration lands in later tasks (T5+).
+ */
+perr_t
+PDC_Server_restart_elastic(int n_old, int n_new)
+{
+    FUNC_ENTER(NULL);
+
+    perr_t ret_value = FAIL;
+
+    LOG_ERROR("Elastic server restart (%d -> %d) is not implemented yet\n", n_old, n_new);
+    PGOTO_ERROR(FAIL, "Elastic server restart not implemented");
+
+done:
+    FUNC_LEAVE(ret_value);
 }
 
 /*
