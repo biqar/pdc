@@ -2667,7 +2667,9 @@ server_run(int argc, char *argv[])
     else
         PDC_Server_lookup_all_servers();
 
-    // Write server addrs to the config file for client to read from
+    // Write server addrs to config for clients. Elastic restart unpublishes any
+    // stale server.cfg and barriers after migration before returning, so this
+    // is the first client-visible publish of N_new after rescale.
     if (pdc_server_rank_g == 0 &&
         PDC_Server_write_addr_to_file(all_addr_strings_g, pdc_server_size_g) != SUCCEED) {
         LOG_ERROR("Error with write config file\n");

@@ -31,8 +31,9 @@
  * Restart with a different server count than the checkpoint (elastic).
  *
  * Eagerly repartitions metadata from N_old checkpoint shards onto N_new ranks.
- * Object migration (T8) is implemented; container migration and server.cfg
- * gating (T9/T10) still return FAIL after objects are placed.
+ * Unpublishes stale server.cfg for the duration of migration, ensures
+ * per-rank tmp dirs exist, and barriers before returning so the caller can
+ * publish server.cfg only after metadata is ready.
  *
  * \param n_old [IN] Server count at checkpoint time
  * \param n_new [IN] Current server MPI size

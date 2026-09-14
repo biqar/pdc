@@ -23,9 +23,12 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <limits.h>
+#include <errno.h>
+#include <sys/stat.h>
 
 #include "pdc_config.h"
 #include "pdc_interface.h"
@@ -1583,6 +1586,69 @@ done:
     FUNC_LEAVE(ret_value);
 }
 
+/*
+ * Remove stale server.cfg so clients cannot attach while elastic migration runs.
+ * Rank 0 only; ENOENT is OK (no prior config).
+ */
+static perr_t
+PDC_Server_rescale_unpublish_server_cfg(void)
+{
+    FUNC_ENTER(NULL);
+
+    perr_t ret_value = SUCCEED;
+    char   config_fname[ADDR_MAX];
+
+    if (pdc_server_rank_g != 0)
+        PGOTO_DONE(SUCCEED);
+
+    if (strpbrk(pdc_server_tmp_dir_g, ";&|`$<>") != NULL)
+        PGOTO_ERROR(FAIL, "Invalid characters in server tmp dir path");
+
+    snprintf(config_fname, ADDR_MAX, "%s%s", pdc_server_tmp_dir_g, pdc_server_cfg_name_g);
+    if (remove(config_fname) != 0 && errno != ENOENT)
+        PGOTO_ERROR(FAIL, "Unable to remove stale config file [%s]: %s", config_fname, strerror(errno));
+
+    LOG_INFO("Unpublished stale %s pending elastic metadata migration\n", pdc_server_cfg_name_g);
+
+done:
+    FUNC_LEAVE(ret_value);
+}
+
+/* Ensure $PDC_TMPDIR/{0..n_new-1}/ exist (needed on scale-up for later checkpoints). */
+static perr_t
+PDC_Server_rescale_ensure_tmp_dirs(int n_new)
+{
+    FUNC_ENTER(NULL);
+
+    perr_t ret_value = SUCCEED;
+    int    i;
+
+    if (n_new <= 0)
+        PGOTO_ERROR(FAIL, "Invalid n_new=%d for tmp dir setup", n_new);
+    if (strpbrk(pdc_server_tmp_dir_g, ";&|`$<>") != NULL)
+        PGOTO_ERROR(FAIL, "Invalid characters in server tmp dir path");
+
+    PDC_mkdir(pdc_server_tmp_dir_g);
+
+    for (i = 0; i < n_new; i++) {
+        char dir[ADDR_MAX];
+
+        snprintf(dir, sizeof(dir), "%s/%d", pdc_server_tmp_dir_g, i);
+        /* PDC_mkdir creates parents only; mkdir creates the leaf rank dir. */
+        PDC_mkdir(dir);
+        if (mkdir(dir, 0755) != 0 && errno != EEXIST)
+            PGOTO_ERROR(FAIL, "Failed to create server tmp dir [%s]: %s", dir, strerror(errno));
+        if (access(dir, F_OK) != 0)
+            PGOTO_ERROR(FAIL, "Server tmp dir missing after create [%s]: %s", dir, strerror(errno));
+    }
+
+    if (pdc_server_rank_g == 0)
+        LOG_INFO("Ensured %d per-rank directories under %s for elastic restart\n", n_new, pdc_server_tmp_dir_g);
+
+done:
+    FUNC_LEAVE(ret_value);
+}
+
 perr_t
 PDC_Server_restart_elastic(int n_old, int n_new)
 {
@@ -1609,6 +1675,10 @@ PDC_Server_restart_elastic(int n_old, int n_new)
         PGOTO_ERROR(FAIL, "Elastic restart with n_new=%d requires MPI", n_new);
 #endif
 
+    /* Gate: drop stale server.cfg before long migration so clients wait for republish. */
+    ret_value = PDC_Server_rescale_unpublish_server_cfg();
+    if (ret_value != SUCCEED)
+        PGOTO_ERROR(FAIL, "Failed to unpublish stale server.cfg before elastic migrate");
 #ifdef ENABLE_MPI
     MPI_Barrier(MPI_COMM_WORLD);
 #endif
@@ -1647,12 +1717,22 @@ PDC_Server_restart_elastic(int n_old, int n_new)
     if (rescale_tmp_conts_g != NULL)
         PDC_Server_rescale_free_tmp_conts();
 
-    /* T10 not done yet: barrier / dirs / server.cfg gating. */
+    /* Scale-up: create missing per-rank dirs before clients attach. */
+    ret_value = PDC_Server_rescale_ensure_tmp_dirs(n_new);
+    if (ret_value != SUCCEED)
+        PGOTO_ERROR(FAIL, "Elastic restart tmp dir setup failed");
+
+    /*
+     * Metadata tables are stable. Barrier so no rank returns early; caller
+     * (server_run) then publishes server.cfg with N_new via write_addr_to_file.
+     */
+#ifdef ENABLE_MPI
+    MPI_Barrier(MPI_COMM_WORLD);
+#endif
+
     if (pdc_server_rank_g == 0)
-        LOG_ERROR("Elastic server.cfg gating (%d -> %d) is not implemented yet "
-                  "(object and container migration succeeded)\n",
-                  n_old, n_new);
-    PGOTO_ERROR(FAIL, "Elastic server restart incomplete: server.cfg gating pending (T10)");
+        LOG_INFO("Elastic metadata migration complete (%d -> %d); ready for server.cfg publish\n", n_old,
+                 n_new);
 
 done:
     FUNC_LEAVE(ret_value);
