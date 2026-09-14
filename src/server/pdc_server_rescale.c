@@ -43,18 +43,18 @@
 #endif
 
 /* Keep in sync with pdc_server.c checkpoint bounds / magic */
-#define PDC_CHECKPOINT_MAGIC_CURRENT       "PDC26.03"
-#define PDC_CHECKPOINT_MAX_METADATA_COUNT  10000000
-#define PDC_CHECKPOINT_MAX_KVTAG_KEY_LEN   65536
-#define PDC_CHECKPOINT_MAX_KVTAG_SIZE      (1u << 24)
-#define PDC_CHECKPOINT_MAX_REGION_COUNT    1000000
-#define PDC_CHECKPOINT_MAX_HIST_NBIN       65536
+#define PDC_CHECKPOINT_MAGIC_CURRENT      "PDC26.03"
+#define PDC_CHECKPOINT_MAX_METADATA_COUNT 10000000
+#define PDC_CHECKPOINT_MAX_KVTAG_KEY_LEN  65536
+#define PDC_CHECKPOINT_MAX_KVTAG_SIZE     (1u << 24)
+#define PDC_CHECKPOINT_MAX_REGION_COUNT   1000000
+#define PDC_CHECKPOINT_MAX_HIST_NBIN      65536
 
 typedef struct pdc_rescale_tmp_cont {
-    uint32_t                         hash_key;
-    int                              source_shard;
-    pdc_cont_hash_table_entry_t *    entry;
-    struct pdc_rescale_tmp_cont *    next;
+    uint32_t                     hash_key;
+    int                          source_shard;
+    pdc_cont_hash_table_entry_t *entry;
+    struct pdc_rescale_tmp_cont *next;
 } pdc_rescale_tmp_cont_t;
 
 /* Cached after successful T6 validation for T7 load planning */
@@ -237,7 +237,7 @@ rescale_append_region_from_bulki(BULKI *region_entry, pdc_metadata_t *metadata, 
 {
     FUNC_ENTER(NULL);
 
-    perr_t         ret_value  = SUCCEED;
+    perr_t         ret_value   = SUCCEED;
     region_list_t *region_list = NULL;
     unsigned       idx;
     int            has_hist;
@@ -504,9 +504,9 @@ rescale_pack_metadata_obj(pdc_metadata_t *elt)
                                   BULKI_ENTITY(&kvlist_elt->kvtag->size, 1, PDC_UINT32, PDC_CLS_ITEM));
             BULKI_put_incremental(kvtag_entry, BULKI_singleton_ENTITY("type", PDC_STRING),
                                   BULKI_ENTITY(&kvlist_elt->kvtag->type, 1, PDC_INT8, PDC_CLS_ITEM));
-            BULKI_put_incremental(kvtag_entry, BULKI_singleton_ENTITY("value", PDC_STRING),
-                                  BULKI_ENTITY(kvlist_elt->kvtag->value, kvlist_elt->kvtag->size, PDC_UINT8,
-                                               PDC_CLS_ARRAY));
+            BULKI_put_incremental(
+                kvtag_entry, BULKI_singleton_ENTITY("value", PDC_STRING),
+                BULKI_ENTITY(kvlist_elt->kvtag->value, kvlist_elt->kvtag->size, PDC_UINT8, PDC_CLS_ARRAY));
             BULKI_ENTITY_append_BULKI_incremental(kvtags_array, kvtag_entry);
         }
         BULKI_put_incremental(metadata_obj, BULKI_singleton_ENTITY("kvtags", PDC_STRING), kvtags_array);
@@ -528,8 +528,9 @@ rescale_pack_metadata_obj(pdc_metadata_t *elt)
             if (has_hist == 1) {
                 BULKI *histogram = BULKI_init(5);
 
-                BULKI_put_incremental(histogram, BULKI_singleton_ENTITY("dtype", PDC_STRING),
-                                      BULKI_ENTITY(&region_elt->region_hist->dtype, 1, PDC_INT, PDC_CLS_ITEM));
+                BULKI_put_incremental(
+                    histogram, BULKI_singleton_ENTITY("dtype", PDC_STRING),
+                    BULKI_ENTITY(&region_elt->region_hist->dtype, 1, PDC_INT, PDC_CLS_ITEM));
                 BULKI_put_incremental(histogram, BULKI_singleton_ENTITY("nbin", PDC_STRING),
                                       BULKI_ENTITY(&region_elt->region_hist->nbin, 1, PDC_INT, PDC_CLS_ITEM));
                 BULKI_put_incremental(histogram, BULKI_singleton_ENTITY("range", PDC_STRING),
@@ -539,9 +540,9 @@ rescale_pack_metadata_obj(pdc_metadata_t *elt)
                 BULKI_put_incremental(histogram, BULKI_singleton_ENTITY("bin", PDC_STRING),
                                       BULKI_ENTITY(region_elt->region_hist->bin,
                                                    region_elt->region_hist->nbin, PDC_UINT64, PDC_CLS_ARRAY));
-                BULKI_put_incremental(histogram, BULKI_singleton_ENTITY("incr", PDC_STRING),
-                                      BULKI_ENTITY(&region_elt->region_hist->incr, 1, PDC_DOUBLE,
-                                                   PDC_CLS_ITEM));
+                BULKI_put_incremental(
+                    histogram, BULKI_singleton_ENTITY("incr", PDC_STRING),
+                    BULKI_ENTITY(&region_elt->region_hist->incr, 1, PDC_DOUBLE, PDC_CLS_ITEM));
                 BULKI_put_incremental(region_entry, BULKI_singleton_ENTITY("histogram", PDC_STRING),
                                       BULKI_ENTITY(histogram, 1, PDC_BULKI, PDC_CLS_ITEM));
             }
@@ -559,10 +560,10 @@ rescale_insert_metadata(pdc_metadata_t *metadata)
 {
     FUNC_ENTER(NULL);
 
-    perr_t                     ret_value     = SUCCEED;
-    uint32_t *                 hash_key      = NULL;
-    pdc_hash_table_entry_head *lookup_value  = NULL;
-    pdc_hash_table_entry_head *entry         = NULL;
+    perr_t                     ret_value    = SUCCEED;
+    uint32_t *                 hash_key     = NULL;
+    pdc_hash_table_entry_head *lookup_value = NULL;
+    pdc_hash_table_entry_head *entry        = NULL;
     uint32_t                   hash_value;
 
     if (metadata == NULL)
@@ -664,28 +665,28 @@ PDC_Server_rescale_migrate_objects(int n_new)
 {
     FUNC_ENTER(NULL);
 
-    perr_t          ret_value      = SUCCEED;
-    pdc_metadata_t *obj            = NULL;
-    pdc_metadata_t *obj_tmp        = NULL;
-    int             before_local   = 0;
-    int             before_global  = 0;
-    int             after_local    = 0;
-    int             after_global   = 0;
-    int             n_inserted     = 0;
+    perr_t          ret_value     = SUCCEED;
+    pdc_metadata_t *obj           = NULL;
+    pdc_metadata_t *obj_tmp       = NULL;
+    int             before_local  = 0;
+    int             before_global = 0;
+    int             after_local   = 0;
+    int             after_global  = 0;
+    int             n_inserted    = 0;
 #ifdef ENABLE_MPI
-    int *           sendcounts     = NULL;
-    int *           recvcounts     = NULL;
-    int *           sdispls        = NULL;
-    int *           rdispls        = NULL;
-    int *           dest_nobj      = NULL;
-    void **         dest_bufs      = NULL;
-    BULKI **        dest_bundles   = NULL;
-    BULKI_Entity ** dest_arrays    = NULL;
-    char *          sendbuf        = NULL;
-    char *          recvbuf        = NULL;
-    int             total_send     = 0;
-    int             total_recv     = 0;
-    int             r;
+    int *          sendcounts   = NULL;
+    int *          recvcounts   = NULL;
+    int *          sdispls      = NULL;
+    int *          rdispls      = NULL;
+    int *          dest_nobj    = NULL;
+    void **        dest_bufs    = NULL;
+    BULKI **       dest_bundles = NULL;
+    BULKI_Entity **dest_arrays  = NULL;
+    char *         sendbuf      = NULL;
+    char *         recvbuf      = NULL;
+    int            total_send   = 0;
+    int            total_recv   = 0;
+    int            r;
 #endif
 
     before_local = rescale_tmp_n_obj_g;
@@ -917,11 +918,11 @@ rescale_load_one_shard(int shard_rank)
 {
     FUNC_ENTER(NULL);
 
-    perr_t        ret_value        = SUCCEED;
-    FILE *        file             = NULL;
-    BULKI *       checkpoint_bulki = NULL;
-    char          path[ADDR_MAX];
-    int           n_region_shard = 0;
+    perr_t ret_value        = SUCCEED;
+    FILE * file             = NULL;
+    BULKI *checkpoint_bulki = NULL;
+    char   path[ADDR_MAX];
+    int    n_region_shard = 0;
 
     checkpoint_shard_path(path, sizeof(path), shard_rank);
     file = fopen(path, "rb");
@@ -950,9 +951,9 @@ rescale_load_one_shard(int shard_rank)
     if (containers_array != NULL && containers_array->pdc_type == PDC_BULKI) {
         BULKI_Entity_Iterator *cont_iter = Bent_iterator_init(containers_array, NULL, PDC_BULKI);
         while (Bent_iterator_has_next_BULKI(cont_iter)) {
-            BULKI *                 container_entry = Bent_iterator_next_BULKI(cont_iter);
-            pdc_rescale_tmp_cont_t *tmp_cont        = NULL;
-            pdc_cont_hash_table_entry_t *cont_entry = NULL;
+            BULKI *                      container_entry = Bent_iterator_next_BULKI(cont_iter);
+            pdc_rescale_tmp_cont_t *     tmp_cont        = NULL;
+            pdc_cont_hash_table_entry_t *cont_entry      = NULL;
 
             BULKI_Entity *hash_key_ent =
                 BULKI_get(container_entry, BULKI_singleton_ENTITY("hash_key", PDC_STRING));
@@ -967,9 +968,9 @@ rescale_load_one_shard(int shard_rank)
             cont_entry = (pdc_cont_hash_table_entry_t *)PDC_malloc(sizeof(pdc_cont_hash_table_entry_t));
             memcpy(cont_entry, cont_data_ent->data, sizeof(pdc_cont_hash_table_entry_t));
             /* Pointers inside the blob are not valid across restart */
-            cont_entry->obj_ids        = NULL;
-            cont_entry->n_obj          = 0;
-            cont_entry->n_allocated    = 0;
+            cont_entry->obj_ids         = NULL;
+            cont_entry->n_obj           = 0;
+            cont_entry->n_allocated     = 0;
             cont_entry->kvtag_list_head = NULL;
 
             tmp_cont = (pdc_rescale_tmp_cont_t *)PDC_calloc(1, sizeof(pdc_rescale_tmp_cont_t));
@@ -1104,7 +1105,7 @@ PDC_Server_rescale_load_shards(int n_old, int n_new)
 {
     FUNC_ENTER(NULL);
 
-    perr_t ret_value   = SUCCEED;
+    perr_t ret_value = SUCCEED;
     int    s;
     int    local_nobj  = 0;
     int    all_nobj    = 0;
@@ -1210,8 +1211,8 @@ PDC_Server_restart_elastic(int n_old, int n_new)
         LOG_ERROR("Elastic container migration and server.cfg gating (%d -> %d) "
                   "are not implemented yet (object migration succeeded)\n",
                   n_old, n_new);
-    PGOTO_ERROR(FAIL,
-                "Elastic server restart incomplete: container migration / server.cfg gating pending (T9/T10)");
+    PGOTO_ERROR(
+        FAIL, "Elastic server restart incomplete: container migration / server.cfg gating pending (T9/T10)");
 
 done:
     FUNC_LEAVE(ret_value);
