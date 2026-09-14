@@ -1056,7 +1056,7 @@ PDC_Server_rescale_validate_shards(int n_old, int n_new)
 #ifdef ENABLE_MPI
     MPI_Allreduce(&local_ok, &global_ok, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
 #else
-    global_ok = local_ok;
+    global_ok     = local_ok;
 #endif
 
     if (!global_ok) {
@@ -1131,8 +1131,8 @@ PDC_Server_rescale_load_shards(int n_old, int n_new)
     MPI_Allreduce(&local_nobj, &all_nobj, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
     MPI_Allreduce(&local_ncont, &all_ncont, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
 #else
-    all_nobj  = local_nobj;
-    all_ncont = local_ncont;
+    all_nobj      = local_nobj;
+    all_ncont     = local_ncont;
 #endif
 
     LOG_INFO("Rank %d temp holders: %d objects, %d regions, %d containers\n", pdc_server_rank_g, local_nobj,
@@ -1371,7 +1371,7 @@ PDC_Server_rescale_migrate_containers(int n_new)
     (void)n_new;
     cont = rescale_tmp_conts_g;
     while (cont) {
-        cont_tmp            = cont->next;
+        cont_tmp                           = cont->next;
         pdc_cont_hash_table_entry_t *entry = cont->entry;
         uint32_t                     hk    = cont->hash_key;
 
@@ -1397,8 +1397,8 @@ PDC_Server_rescale_migrate_containers(int n_new)
     dest_bufs    = (void **)PDC_calloc((size_t)n_new, sizeof(void *));
     dest_bundles = (BULKI **)PDC_calloc((size_t)n_new, sizeof(BULKI *));
     dest_arrays  = (BULKI_Entity **)PDC_calloc((size_t)n_new, sizeof(BULKI_Entity *));
-    if (sendcounts == NULL || recvcounts == NULL || sdispls == NULL || rdispls == NULL || dest_ncont == NULL ||
-        dest_bufs == NULL || dest_bundles == NULL || dest_arrays == NULL)
+    if (sendcounts == NULL || recvcounts == NULL || sdispls == NULL || rdispls == NULL ||
+        dest_ncont == NULL || dest_bufs == NULL || dest_bundles == NULL || dest_arrays == NULL)
         PGOTO_ERROR(FAIL, "Cannot allocate MPI exchange state for container migrate");
 
     /* Count per-dest containers (excluding local). */
@@ -1643,7 +1643,8 @@ PDC_Server_rescale_ensure_tmp_dirs(int n_new)
     }
 
     if (pdc_server_rank_g == 0)
-        LOG_INFO("Ensured %d per-rank directories under %s for elastic restart\n", n_new, pdc_server_tmp_dir_g);
+        LOG_INFO("Ensured %d per-rank directories under %s for elastic restart\n", n_new,
+                 pdc_server_tmp_dir_g);
 
 done:
     FUNC_LEAVE(ret_value);
@@ -1722,10 +1723,10 @@ PDC_Server_restart_elastic(int n_old, int n_new)
     if (ret_value != SUCCEED)
         PGOTO_ERROR(FAIL, "Elastic restart tmp dir setup failed");
 
-    /*
-     * Metadata tables are stable. Barrier so no rank returns early; caller
-     * (server_run) then publishes server.cfg with N_new via write_addr_to_file.
-     */
+        /*
+         * Metadata tables are stable. Barrier so no rank returns early; caller
+         * (server_run) then publishes server.cfg with N_new via write_addr_to_file.
+         */
 #ifdef ENABLE_MPI
     MPI_Barrier(MPI_COMM_WORLD);
 #endif
