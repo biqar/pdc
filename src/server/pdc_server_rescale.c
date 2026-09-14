@@ -658,7 +658,7 @@ done:
 
 /*
  * Migrate temp objects to N_new home ranks; insert into metadata_hash_table_g.
- * Containers remain in temp holders for T9.
+ * Containers remain in temp holders until PDC_Server_rescale_migrate_containers.
  */
 static perr_t
 PDC_Server_rescale_migrate_objects(int n_new)
@@ -1149,6 +1149,440 @@ done:
     FUNC_LEAVE(ret_value);
 }
 
+static void
+rescale_free_one_tmp_cont(pdc_rescale_tmp_cont_t *cont)
+{
+    FUNC_ENTER(NULL);
+
+    if (cont == NULL)
+        FUNC_LEAVE_VOID();
+
+    if (cont->entry != NULL) {
+        cont->entry->obj_ids = (uint64_t *)PDC_free(cont->entry->obj_ids);
+        cont->entry          = (pdc_cont_hash_table_entry_t *)PDC_free(cont->entry);
+    }
+    cont = (pdc_rescale_tmp_cont_t *)PDC_free(cont);
+
+    FUNC_LEAVE_VOID();
+}
+
+/* Pack one container into checkpoint container_entry shape (hash_key + cont_data). */
+static BULKI *
+rescale_pack_container(pdc_rescale_tmp_cont_t *cont)
+{
+    FUNC_ENTER(NULL);
+
+    BULKI *entry_bulki = NULL;
+
+    if (cont == NULL || cont->entry == NULL)
+        FUNC_LEAVE(NULL);
+
+    entry_bulki = BULKI_init(2);
+    BULKI_put_incremental(entry_bulki, BULKI_singleton_ENTITY("hash_key", PDC_STRING),
+                          BULKI_ENTITY(&cont->hash_key, 1, PDC_UINT32, PDC_CLS_ITEM));
+    BULKI_put_incremental(
+        entry_bulki, BULKI_singleton_ENTITY("cont_data", PDC_STRING),
+        BULKI_ENTITY(cont->entry, sizeof(pdc_cont_hash_table_entry_t), PDC_UINT8, PDC_CLS_ARRAY));
+
+    FUNC_LEAVE(entry_bulki);
+}
+
+/*
+ * Insert container into container_hash_table_g. Takes ownership of entry on success.
+ * Uses hash of cont_name (must match client create: home_rank(name, 0, N)).
+ */
+static perr_t
+rescale_insert_container(pdc_cont_hash_table_entry_t *entry, uint32_t hash_key_val)
+{
+    FUNC_ENTER(NULL);
+
+    perr_t                       ret_value    = SUCCEED;
+    uint32_t *                   hash_key     = NULL;
+    pdc_cont_hash_table_entry_t *lookup_value = NULL;
+
+    if (entry == NULL)
+        PGOTO_ERROR(FAIL, "container entry is NULL");
+    if (container_hash_table_g == NULL)
+        PGOTO_ERROR(FAIL, "container_hash_table_g not initialized");
+
+    /* Match checkpoint write / client create: hash key is PDC_get_hash_by_name(cont_name). */
+    {
+        uint32_t name_hash = PDC_get_hash_by_name(entry->cont_name);
+        if (name_hash != hash_key_val && pdc_server_rank_g == 0)
+            LOG_INFO("Container [%s] stored hash_key %u differs from name hash %u; using name hash\n",
+                     entry->cont_name, hash_key_val, name_hash);
+        hash_key_val = name_hash;
+    }
+
+    lookup_value = hash_table_lookup(container_hash_table_g, &hash_key_val);
+    if (lookup_value != NULL) {
+        if (lookup_value->cont_id != entry->cont_id)
+            PGOTO_ERROR(FAIL, "Duplicate container name [%s] with different cont_id during elastic migrate",
+                        entry->cont_name);
+        /* Identical container already present — drop duplicate payload. */
+        entry->obj_ids = (uint64_t *)PDC_free(entry->obj_ids);
+        entry          = (pdc_cont_hash_table_entry_t *)PDC_free(entry);
+        PGOTO_DONE(SUCCEED);
+    }
+
+    hash_key = (uint32_t *)PDC_malloc(sizeof(uint32_t));
+    if (hash_key == NULL)
+        PGOTO_ERROR(FAIL, "Cannot allocate container hash_key");
+    *hash_key = hash_key_val;
+
+    entry->obj_ids         = NULL;
+    entry->n_obj           = 0;
+    entry->n_allocated     = 0;
+    entry->kvtag_list_head = NULL;
+
+    if (hash_table_insert(container_hash_table_g, hash_key, entry) != 1)
+        PGOTO_ERROR(FAIL, "Hash table insert failed for container [%s]", entry->cont_name);
+
+    hash_key = NULL;
+    entry    = NULL;
+
+done:
+    if (ret_value != SUCCEED) {
+        if (hash_key != NULL)
+            hash_key = (uint32_t *)PDC_free(hash_key);
+        if (entry != NULL) {
+            entry->obj_ids = (uint64_t *)PDC_free(entry->obj_ids);
+            entry          = (pdc_cont_hash_table_entry_t *)PDC_free(entry);
+        }
+    }
+    FUNC_LEAVE(ret_value);
+}
+
+static perr_t
+rescale_ingest_cont_bundle(void *buf, int buf_size, int *n_inserted)
+{
+    FUNC_ENTER(NULL);
+
+    perr_t ret_value = SUCCEED;
+    BULKI *bundle    = NULL;
+
+    if (buf_size == 0)
+        PGOTO_DONE(SUCCEED);
+    if (buf == NULL || buf_size < 0)
+        PGOTO_ERROR(FAIL, "Invalid container migration bundle");
+
+    bundle = BULKI_deserialize(buf);
+    if (bundle == NULL)
+        PGOTO_ERROR(FAIL, "Failed to deserialize container migration bundle");
+
+    BULKI_Entity *conts_array = BULKI_get(bundle, BULKI_singleton_ENTITY("containers", PDC_STRING));
+    if (conts_array == NULL || conts_array->pdc_type != PDC_BULKI)
+        PGOTO_ERROR(FAIL, "Missing containers array in migration bundle");
+
+    {
+        BULKI_Entity_Iterator *cont_iter = Bent_iterator_init(conts_array, NULL, PDC_BULKI);
+        while (Bent_iterator_has_next_BULKI(cont_iter)) {
+            BULKI *                      container_entry = Bent_iterator_next_BULKI(cont_iter);
+            uint32_t                     hash_key_val    = 0;
+            pdc_cont_hash_table_entry_t *cont_entry      = NULL;
+
+            BULKI_Entity *hash_key_ent =
+                BULKI_get(container_entry, BULKI_singleton_ENTITY("hash_key", PDC_STRING));
+            if (hash_key_ent == NULL || hash_key_ent->data == NULL)
+                PGOTO_ERROR(FAIL, "Missing container hash_key in migration bundle");
+            memcpy(&hash_key_val, hash_key_ent->data, sizeof(uint32_t));
+
+            BULKI_Entity *cont_data_ent =
+                BULKI_get(container_entry, BULKI_singleton_ENTITY("cont_data", PDC_STRING));
+            if (cont_data_ent == NULL || cont_data_ent->data == NULL)
+                PGOTO_ERROR(FAIL, "Missing container cont_data in migration bundle");
+
+            cont_entry = (pdc_cont_hash_table_entry_t *)PDC_malloc(sizeof(pdc_cont_hash_table_entry_t));
+            if (cont_entry == NULL)
+                PGOTO_ERROR(FAIL, "Cannot allocate container entry");
+            memcpy(cont_entry, cont_data_ent->data, sizeof(pdc_cont_hash_table_entry_t));
+            cont_entry->obj_ids         = NULL;
+            cont_entry->n_obj           = 0;
+            cont_entry->n_allocated     = 0;
+            cont_entry->kvtag_list_head = NULL;
+
+            if (rescale_insert_container(cont_entry, hash_key_val) != SUCCEED)
+                PGOTO_ERROR(FAIL, "Failed to insert migrated container");
+            if (n_inserted)
+                (*n_inserted)++;
+        }
+    }
+
+done:
+    if (bundle != NULL)
+        BULKI_free(bundle, 1);
+    FUNC_LEAVE(ret_value);
+}
+
+/*
+ * Migrate temp containers to N_new home ranks using
+ * PDC_metadata_home_rank(cont_name, 0, N_new) — same as client create/query.
+ * Keeps stable cont_id values.
+ */
+static perr_t
+PDC_Server_rescale_migrate_containers(int n_new)
+{
+    FUNC_ENTER(NULL);
+
+    perr_t                  ret_value     = SUCCEED;
+    pdc_rescale_tmp_cont_t *cont          = NULL;
+    pdc_rescale_tmp_cont_t *cont_tmp      = NULL;
+    int                     before_local  = 0;
+    int                     before_global = 0;
+    int                     after_local   = 0;
+    int                     after_global  = 0;
+    int                     n_inserted    = 0;
+#ifdef ENABLE_MPI
+    int *          sendcounts   = NULL;
+    int *          recvcounts   = NULL;
+    int *          sdispls      = NULL;
+    int *          rdispls      = NULL;
+    int *          dest_ncont   = NULL;
+    void **        dest_bufs    = NULL;
+    BULKI **       dest_bundles = NULL;
+    BULKI_Entity **dest_arrays  = NULL;
+    char *         sendbuf      = NULL;
+    char *         recvbuf      = NULL;
+    int            total_send   = 0;
+    int            total_recv   = 0;
+    int            r;
+#endif
+
+    before_local = rescale_tmp_n_cont_g;
+#ifdef ENABLE_MPI
+    MPI_Allreduce(&before_local, &before_global, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+#else
+    before_global = before_local;
+#endif
+
+    if (pdc_server_rank_g == 0)
+        LOG_INFO("Elastic container migrate: %d containers before exchange (N_new=%d)\n", before_global,
+                 n_new);
+
+    if (container_hash_table_g == NULL) {
+        if (PDC_Server_init_hash_table() != SUCCEED)
+            PGOTO_ERROR(FAIL, "Error with PDC_Server_init_hash_table during container migrate");
+    }
+
+#ifndef ENABLE_MPI
+    (void)n_new;
+    cont = rescale_tmp_conts_g;
+    while (cont) {
+        cont_tmp            = cont->next;
+        pdc_cont_hash_table_entry_t *entry = cont->entry;
+        uint32_t                     hk    = cont->hash_key;
+
+        cont->entry = NULL;
+        cont        = (pdc_rescale_tmp_cont_t *)PDC_free(cont);
+        cont        = cont_tmp;
+
+        if (rescale_insert_container(entry, hk) != SUCCEED)
+            PGOTO_ERROR(FAIL, "Failed to insert local container during non-MPI elastic migrate");
+        n_inserted++;
+    }
+    rescale_tmp_conts_g  = NULL;
+    rescale_tmp_n_cont_g = 0;
+#else
+    if (n_new <= 0)
+        PGOTO_ERROR(FAIL, "Invalid n_new=%d for container migrate", n_new);
+
+    sendcounts   = (int *)PDC_calloc((size_t)n_new, sizeof(int));
+    recvcounts   = (int *)PDC_calloc((size_t)n_new, sizeof(int));
+    sdispls      = (int *)PDC_calloc((size_t)n_new, sizeof(int));
+    rdispls      = (int *)PDC_calloc((size_t)n_new, sizeof(int));
+    dest_ncont   = (int *)PDC_calloc((size_t)n_new, sizeof(int));
+    dest_bufs    = (void **)PDC_calloc((size_t)n_new, sizeof(void *));
+    dest_bundles = (BULKI **)PDC_calloc((size_t)n_new, sizeof(BULKI *));
+    dest_arrays  = (BULKI_Entity **)PDC_calloc((size_t)n_new, sizeof(BULKI_Entity *));
+    if (sendcounts == NULL || recvcounts == NULL || sdispls == NULL || rdispls == NULL || dest_ncont == NULL ||
+        dest_bufs == NULL || dest_bundles == NULL || dest_arrays == NULL)
+        PGOTO_ERROR(FAIL, "Cannot allocate MPI exchange state for container migrate");
+
+    /* Count per-dest containers (excluding local). */
+    for (cont = rescale_tmp_conts_g; cont != NULL; cont = cont->next) {
+        int dest = (int)PDC_metadata_home_rank(cont->entry->cont_name, 0, n_new);
+        if (dest < 0 || dest >= n_new)
+            PGOTO_ERROR(FAIL, "Invalid home rank %d for container %s", dest, cont->entry->cont_name);
+        if (dest != pdc_server_rank_g)
+            dest_ncont[dest]++;
+    }
+
+    for (r = 0; r < n_new; r++) {
+        if (dest_ncont[r] <= 0)
+            continue;
+        dest_bundles[r] = BULKI_init(1);
+        dest_arrays[r]  = empty_BULKI_Array_Entity_with_capacity(dest_ncont[r]);
+    }
+
+    /* Local insert or pack for remote. */
+    cont = rescale_tmp_conts_g;
+    while (cont) {
+        int                          dest;
+        pdc_cont_hash_table_entry_t *entry;
+
+        cont_tmp = cont->next;
+        dest     = (int)PDC_metadata_home_rank(cont->entry->cont_name, 0, n_new);
+        entry    = cont->entry;
+
+        if (dest == pdc_server_rank_g) {
+            uint32_t hk = cont->hash_key;
+            cont->entry = NULL;
+            cont        = (pdc_rescale_tmp_cont_t *)PDC_free(cont);
+            cont        = cont_tmp;
+            if (rescale_insert_container(entry, hk) != SUCCEED)
+                PGOTO_ERROR(FAIL, "Failed to insert local-home container during elastic migrate");
+            n_inserted++;
+            continue;
+        }
+
+        {
+            BULKI *packed = rescale_pack_container(cont);
+            if (packed == NULL)
+                PGOTO_ERROR(FAIL, "Failed to pack container for migrate");
+            BULKI_ENTITY_append_BULKI_incremental(dest_arrays[dest], packed);
+            packed = (BULKI *)PDC_free(packed);
+            rescale_free_one_tmp_cont(cont);
+            cont = cont_tmp;
+        }
+    }
+    rescale_tmp_conts_g  = NULL;
+    rescale_tmp_n_cont_g = 0;
+
+    for (r = 0; r < n_new; r++) {
+        size_t ser_size = 0;
+
+        if (dest_bundles[r] == NULL)
+            continue;
+
+        BULKI_put_incremental(dest_bundles[r], BULKI_singleton_ENTITY("containers", PDC_STRING),
+                              dest_arrays[r]);
+        dest_arrays[r] = NULL;
+
+        dest_bufs[r] = BULKI_serialize(dest_bundles[r], &ser_size);
+        BULKI_free(dest_bundles[r], 1);
+        dest_bundles[r] = NULL;
+
+        if (dest_bufs[r] == NULL)
+            PGOTO_ERROR(FAIL, "Failed to serialize container migrate bundle for dest %d", r);
+        if (ser_size > (size_t)INT_MAX)
+            PGOTO_ERROR(FAIL, "Container migrate bundle too large for MPI counts");
+        sendcounts[r] = (int)ser_size;
+    }
+
+    MPI_Alltoall(sendcounts, 1, MPI_INT, recvcounts, 1, MPI_INT, MPI_COMM_WORLD);
+
+    total_send = 0;
+    total_recv = 0;
+    for (r = 0; r < n_new; r++) {
+        sdispls[r] = total_send;
+        rdispls[r] = total_recv;
+        total_send += sendcounts[r];
+        total_recv += recvcounts[r];
+    }
+
+    if (total_send > 0) {
+        sendbuf = (char *)PDC_malloc((size_t)total_send);
+        if (sendbuf == NULL)
+            PGOTO_ERROR(FAIL, "Cannot allocate container Alltoallv send buffer");
+        for (r = 0; r < n_new; r++) {
+            if (sendcounts[r] > 0 && dest_bufs[r] != NULL) {
+                memcpy(sendbuf + sdispls[r], dest_bufs[r], (size_t)sendcounts[r]);
+                dest_bufs[r] = PDC_free(dest_bufs[r]);
+            }
+        }
+    }
+    for (r = 0; r < n_new; r++) {
+        if (dest_bufs[r] != NULL)
+            dest_bufs[r] = PDC_free(dest_bufs[r]);
+    }
+
+    if (total_recv > 0) {
+        recvbuf = (char *)PDC_malloc((size_t)total_recv);
+        if (recvbuf == NULL)
+            PGOTO_ERROR(FAIL, "Cannot allocate container Alltoallv recv buffer");
+    }
+
+    {
+        char dummy = 0;
+        MPI_Alltoallv(total_send > 0 ? sendbuf : &dummy, sendcounts, sdispls, MPI_BYTE,
+                      total_recv > 0 ? recvbuf : &dummy, recvcounts, rdispls, MPI_BYTE, MPI_COMM_WORLD);
+    }
+
+    if (sendbuf != NULL)
+        sendbuf = (char *)PDC_free(sendbuf);
+
+    for (r = 0; r < n_new; r++) {
+        if (recvcounts[r] <= 0)
+            continue;
+        if (rescale_ingest_cont_bundle(recvbuf + rdispls[r], recvcounts[r], &n_inserted) != SUCCEED)
+            PGOTO_ERROR(FAIL, "Failed to ingest migrated containers from rank %d", r);
+    }
+
+    if (recvbuf != NULL)
+        recvbuf = (char *)PDC_free(recvbuf);
+#endif /* ENABLE_MPI */
+
+    after_local = n_inserted;
+#ifdef ENABLE_MPI
+    MPI_Allreduce(&after_local, &after_global, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+#else
+    after_global = after_local;
+#endif
+
+    LOG_INFO("Rank %d inserted %d containers after elastic migrate\n", pdc_server_rank_g, after_local);
+
+    if (pdc_server_rank_g == 0)
+        LOG_INFO("Elastic container migrate complete: %d containers before, %d after\n", before_global,
+                 after_global);
+
+    if (before_global != after_global)
+        PGOTO_ERROR(FAIL, "Container count mismatch after elastic migrate (%d before, %d after)",
+                    before_global, after_global);
+
+done:
+#ifdef ENABLE_MPI
+    if (ret_value != SUCCEED) {
+        for (r = 0; r < n_new; r++) {
+            if (dest_bufs != NULL && dest_bufs[r] != NULL)
+                dest_bufs[r] = PDC_free(dest_bufs[r]);
+            if (dest_bundles != NULL && dest_bundles[r] != NULL) {
+                BULKI_free(dest_bundles[r], 1);
+                dest_bundles[r] = NULL;
+            }
+            if (dest_arrays != NULL && dest_arrays[r] != NULL) {
+                BULKI_Entity_free(dest_arrays[r], 1);
+                dest_arrays[r] = NULL;
+            }
+        }
+        if (sendbuf != NULL)
+            sendbuf = (char *)PDC_free(sendbuf);
+        if (recvbuf != NULL)
+            recvbuf = (char *)PDC_free(recvbuf);
+        PDC_Server_rescale_free_tmp_conts();
+    }
+    if (sendcounts != NULL)
+        sendcounts = (int *)PDC_free(sendcounts);
+    if (recvcounts != NULL)
+        recvcounts = (int *)PDC_free(recvcounts);
+    if (sdispls != NULL)
+        sdispls = (int *)PDC_free(sdispls);
+    if (rdispls != NULL)
+        rdispls = (int *)PDC_free(rdispls);
+    if (dest_ncont != NULL)
+        dest_ncont = (int *)PDC_free(dest_ncont);
+    if (dest_bufs != NULL)
+        dest_bufs = (void **)PDC_free(dest_bufs);
+    if (dest_bundles != NULL)
+        dest_bundles = (BULKI **)PDC_free(dest_bundles);
+    if (dest_arrays != NULL)
+        dest_arrays = (BULKI_Entity **)PDC_free(dest_arrays);
+#else
+    if (ret_value != SUCCEED)
+        PDC_Server_rescale_free_tmp_conts();
+#endif
+    FUNC_LEAVE(ret_value);
+}
+
 perr_t
 PDC_Server_restart_elastic(int n_old, int n_new)
 {
@@ -1205,14 +1639,20 @@ PDC_Server_restart_elastic(int n_old, int n_new)
     if (rescale_tmp_objs_g != NULL)
         PDC_Server_rescale_free_tmp_objs();
 
-    /* T9/T10 not done yet: free temp containers and fail clearly. */
-    PDC_Server_rescale_free_tmp_conts();
+    ret_value = PDC_Server_rescale_migrate_containers(n_new);
+    if (ret_value != SUCCEED)
+        PGOTO_ERROR(FAIL, "Elastic container migration failed");
+
+    /* Containers now live in container_hash_table_g — do not free HT-owned entries. */
+    if (rescale_tmp_conts_g != NULL)
+        PDC_Server_rescale_free_tmp_conts();
+
+    /* T10 not done yet: barrier / dirs / server.cfg gating. */
     if (pdc_server_rank_g == 0)
-        LOG_ERROR("Elastic container migration and server.cfg gating (%d -> %d) "
-                  "are not implemented yet (object migration succeeded)\n",
+        LOG_ERROR("Elastic server.cfg gating (%d -> %d) is not implemented yet "
+                  "(object and container migration succeeded)\n",
                   n_old, n_new);
-    PGOTO_ERROR(
-        FAIL, "Elastic server restart incomplete: container migration / server.cfg gating pending (T9/T10)");
+    PGOTO_ERROR(FAIL, "Elastic server restart incomplete: server.cfg gating pending (T10)");
 
 done:
     FUNC_LEAVE(ret_value);
