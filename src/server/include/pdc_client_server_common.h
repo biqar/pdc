@@ -4354,6 +4354,17 @@ uint32_t PDC_get_hash_by_name(const char *name);
 uint32_t PDC_get_server_by_name(char *name, int n_server);
 
 /**
+ * Canonical metadata home rank for create / name+timestep query / elastic migration.
+ *
+ * \param name [IN]             Object (or container) name
+ * \param time_step [IN]        Object time step (use 0 when not applicable)
+ * \param n_server [IN]         Total number of servers
+ *
+ * \return Server rank in [0, n_server), or 0 if name is NULL or n_server <= 0
+ */
+uint32_t PDC_metadata_home_rank(const char *name, int32_t time_step, int n_server);
+
+/**
  * Get the server ID
  *
  * \param my_rank [IN]           Client rank

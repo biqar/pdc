@@ -339,6 +339,27 @@ PDC_get_server_by_name(char *name, int n_server)
     FUNC_LEAVE(ret_value);
 }
 
+/*
+ * Canonical metadata home rank: (hash(name) + time_step) % n_server.
+ * Used by create, name+timestep query, and elastic migration.
+ */
+uint32_t
+PDC_metadata_home_rank(const char *name, int32_t time_step, int n_server)
+{
+    FUNC_ENTER(NULL);
+
+    uint32_t ret_value = 0;
+    uint32_t hash_name_value;
+
+    if (name == NULL || n_server <= 0)
+        FUNC_LEAVE(0);
+
+    hash_name_value = PDC_get_hash_by_name(name);
+    ret_value       = (hash_name_value + (uint32_t)time_step) % (uint32_t)n_server;
+
+    FUNC_LEAVE(ret_value);
+}
+
 int
 PDC_metadata_cmp(pdc_metadata_t *a, pdc_metadata_t *b)
 {
