@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#include <limits.h>
 
 #include "pdc_config.h"
 #include "pdc_interface.h"
@@ -164,23 +165,26 @@ rescale_free_region_list(region_list_t *head)
 }
 
 static void
-PDC_Server_rescale_free_tmp_holders(void)
+rescale_free_one_metadata(pdc_metadata_t *obj)
 {
     FUNC_ENTER(NULL);
 
-    pdc_metadata_t *       obj, *obj_tmp;
-    pdc_rescale_tmp_cont_t *cont, *cont_tmp;
+    if (obj == NULL)
+        FUNC_LEAVE_VOID();
 
-    DL_FOREACH_SAFE(rescale_tmp_objs_g, obj, obj_tmp)
-    {
-        DL_DELETE(rescale_tmp_objs_g, obj);
-        rescale_free_kvtag_list(obj->kvtag_list_head);
-        rescale_free_region_list(obj->storage_region_list_head);
-        obj = (pdc_metadata_t *)PDC_free(obj);
-    }
-    rescale_tmp_objs_g     = NULL;
-    rescale_tmp_n_obj_g    = 0;
-    rescale_tmp_n_region_g = 0;
+    rescale_free_kvtag_list(obj->kvtag_list_head);
+    rescale_free_region_list(obj->storage_region_list_head);
+    obj = (pdc_metadata_t *)PDC_free(obj);
+
+    FUNC_LEAVE_VOID();
+}
+
+static void
+PDC_Server_rescale_free_tmp_conts(void)
+{
+    FUNC_ENTER(NULL);
+
+    pdc_rescale_tmp_cont_t *cont, *cont_tmp;
 
     cont = rescale_tmp_conts_g;
     while (cont) {
@@ -194,6 +198,36 @@ PDC_Server_rescale_free_tmp_holders(void)
     }
     rescale_tmp_conts_g  = NULL;
     rescale_tmp_n_cont_g = 0;
+
+    FUNC_LEAVE_VOID();
+}
+
+static void
+PDC_Server_rescale_free_tmp_objs(void)
+{
+    FUNC_ENTER(NULL);
+
+    pdc_metadata_t *obj, *obj_tmp;
+
+    DL_FOREACH_SAFE(rescale_tmp_objs_g, obj, obj_tmp)
+    {
+        DL_DELETE(rescale_tmp_objs_g, obj);
+        rescale_free_one_metadata(obj);
+    }
+    rescale_tmp_objs_g     = NULL;
+    rescale_tmp_n_obj_g    = 0;
+    rescale_tmp_n_region_g = 0;
+
+    FUNC_LEAVE_VOID();
+}
+
+static void
+PDC_Server_rescale_free_tmp_holders(void)
+{
+    FUNC_ENTER(NULL);
+
+    PDC_Server_rescale_free_tmp_objs();
+    PDC_Server_rescale_free_tmp_conts();
 
     FUNC_LEAVE_VOID();
 }
@@ -316,12 +350,16 @@ done:
 }
 
 static perr_t
-rescale_append_obj_from_bulki(BULKI *metadata_obj, int source_shard, int *n_region_out)
+rescale_parse_obj_from_bulki(BULKI *metadata_obj, pdc_metadata_t **out_meta, int *n_region_out)
 {
     FUNC_ENTER(NULL);
 
     perr_t          ret_value = SUCCEED;
     pdc_metadata_t *metadata  = NULL;
+
+    if (out_meta == NULL)
+        PGOTO_ERROR(FAIL, "out_meta is NULL");
+    *out_meta = NULL;
 
     metadata = (pdc_metadata_t *)PDC_calloc(1, sizeof(pdc_metadata_t));
     if (metadata == NULL)
@@ -341,7 +379,6 @@ rescale_append_obj_from_bulki(BULKI *metadata_obj, int source_shard, int *n_regi
     metadata->next                           = NULL;
     metadata->kvtag_list_head                = NULL;
     metadata->all_storage_region_distributed = 0;
-    (void)source_shard;
 
     BULKI_Entity *kvtags_array = BULKI_get(metadata_obj, BULKI_singleton_ENTITY("kvtags", PDC_STRING));
     if (kvtags_array != NULL && kvtags_array->pdc_type == PDC_BULKI) {
@@ -402,16 +439,476 @@ rescale_append_obj_from_bulki(BULKI *metadata_obj, int source_shard, int *n_regi
         DL_SORT(metadata->storage_region_list_head, rescale_region_cmp);
     }
 
+    *out_meta = metadata;
+    metadata  = NULL;
+
+done:
+    if (ret_value != SUCCEED && metadata != NULL)
+        rescale_free_one_metadata(metadata);
+    FUNC_LEAVE(ret_value);
+}
+
+static perr_t
+rescale_append_obj_from_bulki(BULKI *metadata_obj, int source_shard, int *n_region_out)
+{
+    FUNC_ENTER(NULL);
+
+    perr_t          ret_value = SUCCEED;
+    pdc_metadata_t *metadata  = NULL;
+
+    (void)source_shard;
+
+    if (rescale_parse_obj_from_bulki(metadata_obj, &metadata, n_region_out) != SUCCEED)
+        PGOTO_ERROR(FAIL, "Failed to parse metadata object");
+
     DL_APPEND(rescale_tmp_objs_g, metadata);
     rescale_tmp_n_obj_g++;
     metadata = NULL;
 
 done:
-    if (ret_value != SUCCEED && metadata != NULL) {
-        rescale_free_kvtag_list(metadata->kvtag_list_head);
-        rescale_free_region_list(metadata->storage_region_list_head);
-        metadata = (pdc_metadata_t *)PDC_free(metadata);
+    if (ret_value != SUCCEED && metadata != NULL)
+        rescale_free_one_metadata(metadata);
+    FUNC_LEAVE(ret_value);
+}
+
+/* Pack one object into checkpoint metadata_obj shape (metadata + kvtags + regions). */
+static BULKI *
+rescale_pack_metadata_obj(pdc_metadata_t *elt)
+{
+    FUNC_ENTER(NULL);
+
+    BULKI *           metadata_obj = NULL;
+    pdc_kvtag_list_t *kvlist_elt;
+    region_list_t *   region_elt;
+    int               n_kvtag  = 0;
+    int               n_region = 0;
+
+    if (elt == NULL)
+        FUNC_LEAVE(NULL);
+
+    metadata_obj = BULKI_init(3);
+
+    BULKI_put_incremental(metadata_obj, BULKI_singleton_ENTITY("metadata", PDC_STRING),
+                          BULKI_ENTITY(elt, sizeof(pdc_metadata_t), PDC_UINT8, PDC_CLS_ARRAY));
+
+    DL_COUNT(elt->kvtag_list_head, kvlist_elt, n_kvtag);
+    {
+        BULKI_Entity *kvtags_array = empty_BULKI_Array_Entity_with_capacity(n_kvtag > 0 ? n_kvtag : 1);
+        DL_FOREACH(elt->kvtag_list_head, kvlist_elt)
+        {
+            BULKI *kvtag_entry = BULKI_init(4);
+
+            BULKI_put_incremental(kvtag_entry, BULKI_singleton_ENTITY("key", PDC_STRING),
+                                  BULKI_singleton_ENTITY(kvlist_elt->kvtag->name, PDC_STRING));
+            BULKI_put_incremental(kvtag_entry, BULKI_singleton_ENTITY("size", PDC_STRING),
+                                  BULKI_ENTITY(&kvlist_elt->kvtag->size, 1, PDC_UINT32, PDC_CLS_ITEM));
+            BULKI_put_incremental(kvtag_entry, BULKI_singleton_ENTITY("type", PDC_STRING),
+                                  BULKI_ENTITY(&kvlist_elt->kvtag->type, 1, PDC_INT8, PDC_CLS_ITEM));
+            BULKI_put_incremental(kvtag_entry, BULKI_singleton_ENTITY("value", PDC_STRING),
+                                  BULKI_ENTITY(kvlist_elt->kvtag->value, kvlist_elt->kvtag->size, PDC_UINT8,
+                                               PDC_CLS_ARRAY));
+            BULKI_ENTITY_append_BULKI_incremental(kvtags_array, kvtag_entry);
+        }
+        BULKI_put_incremental(metadata_obj, BULKI_singleton_ENTITY("kvtags", PDC_STRING), kvtags_array);
     }
+
+    DL_COUNT(elt->storage_region_list_head, region_elt, n_region);
+    {
+        BULKI_Entity *regions_array = empty_BULKI_Array_Entity_with_capacity(n_region > 0 ? n_region : 1);
+        DL_FOREACH(elt->storage_region_list_head, region_elt)
+        {
+            BULKI *region_entry = BULKI_init(3);
+            int    has_hist     = (region_elt->region_hist != NULL) ? 1 : 0;
+
+            BULKI_put_incremental(region_entry, BULKI_singleton_ENTITY("region", PDC_STRING),
+                                  BULKI_ENTITY(region_elt, sizeof(region_list_t), PDC_UINT8, PDC_CLS_ARRAY));
+            BULKI_put_incremental(region_entry, BULKI_singleton_ENTITY("has_hist", PDC_STRING),
+                                  BULKI_ENTITY(&has_hist, 1, PDC_INT, PDC_CLS_ITEM));
+
+            if (has_hist == 1) {
+                BULKI *histogram = BULKI_init(5);
+
+                BULKI_put_incremental(histogram, BULKI_singleton_ENTITY("dtype", PDC_STRING),
+                                      BULKI_ENTITY(&region_elt->region_hist->dtype, 1, PDC_INT, PDC_CLS_ITEM));
+                BULKI_put_incremental(histogram, BULKI_singleton_ENTITY("nbin", PDC_STRING),
+                                      BULKI_ENTITY(&region_elt->region_hist->nbin, 1, PDC_INT, PDC_CLS_ITEM));
+                BULKI_put_incremental(histogram, BULKI_singleton_ENTITY("range", PDC_STRING),
+                                      BULKI_ENTITY(region_elt->region_hist->range,
+                                                   region_elt->region_hist->nbin * 2, PDC_DOUBLE,
+                                                   PDC_CLS_ARRAY));
+                BULKI_put_incremental(histogram, BULKI_singleton_ENTITY("bin", PDC_STRING),
+                                      BULKI_ENTITY(region_elt->region_hist->bin,
+                                                   region_elt->region_hist->nbin, PDC_UINT64, PDC_CLS_ARRAY));
+                BULKI_put_incremental(histogram, BULKI_singleton_ENTITY("incr", PDC_STRING),
+                                      BULKI_ENTITY(&region_elt->region_hist->incr, 1, PDC_DOUBLE,
+                                                   PDC_CLS_ITEM));
+                BULKI_put_incremental(region_entry, BULKI_singleton_ENTITY("histogram", PDC_STRING),
+                                      BULKI_ENTITY(histogram, 1, PDC_BULKI, PDC_CLS_ITEM));
+            }
+
+            BULKI_ENTITY_append_BULKI_incremental(regions_array, region_entry);
+        }
+        BULKI_put_incremental(metadata_obj, BULKI_singleton_ENTITY("regions", PDC_STRING), regions_array);
+    }
+
+    FUNC_LEAVE(metadata_obj);
+}
+
+static perr_t
+rescale_insert_metadata(pdc_metadata_t *metadata)
+{
+    FUNC_ENTER(NULL);
+
+    perr_t                     ret_value     = SUCCEED;
+    uint32_t *                 hash_key      = NULL;
+    pdc_hash_table_entry_head *lookup_value  = NULL;
+    pdc_hash_table_entry_head *entry         = NULL;
+    uint32_t                   hash_value;
+
+    if (metadata == NULL)
+        PGOTO_ERROR(FAIL, "metadata is NULL");
+    if (metadata_hash_table_g == NULL)
+        PGOTO_ERROR(FAIL, "metadata_hash_table_g not initialized");
+
+    hash_value   = PDC_get_hash_by_name(metadata->obj_name);
+    lookup_value = hash_table_lookup(metadata_hash_table_g, &hash_value);
+
+    if (lookup_value != NULL) {
+        if (PDC_Server_hash_table_list_insert(lookup_value, metadata) != SUCCEED)
+            PGOTO_ERROR(FAIL, "Error inserting metadata into existing hash entry");
+    }
+    else {
+        hash_key = (uint32_t *)PDC_malloc(sizeof(uint32_t));
+        if (hash_key == NULL)
+            PGOTO_ERROR(FAIL, "Cannot allocate hash_key");
+        *hash_key = hash_value;
+
+        entry = (pdc_hash_table_entry_head *)PDC_malloc(sizeof(pdc_hash_table_entry_head));
+        if (entry == NULL)
+            PGOTO_ERROR(FAIL, "Cannot allocate hash table entry");
+        entry->bloom    = NULL;
+        entry->metadata = NULL;
+        entry->n_obj    = 0;
+
+        if (PDC_Server_hash_table_list_init(entry, hash_key) != SUCCEED)
+            PGOTO_ERROR(FAIL, "Error with PDC_Server_hash_table_list_init");
+        hash_key = NULL;
+
+        if (PDC_Server_hash_table_list_insert(entry, metadata) != SUCCEED)
+            PGOTO_ERROR(FAIL, "Error inserting metadata into new hash entry");
+        entry = NULL;
+    }
+
+    n_metadata_g++;
+
+done:
+    if (ret_value != SUCCEED) {
+        if (hash_key != NULL)
+            hash_key = (uint32_t *)PDC_free(hash_key);
+        if (entry != NULL)
+            entry = (pdc_hash_table_entry_head *)PDC_free(entry);
+    }
+    FUNC_LEAVE(ret_value);
+}
+
+static perr_t
+rescale_ingest_obj_bundle(void *buf, int buf_size, int *n_inserted)
+{
+    FUNC_ENTER(NULL);
+
+    perr_t ret_value = SUCCEED;
+    BULKI *bundle    = NULL;
+
+    if (buf_size == 0)
+        PGOTO_DONE(SUCCEED);
+    if (buf == NULL || buf_size < 0)
+        PGOTO_ERROR(FAIL, "Invalid object migration bundle");
+
+    bundle = BULKI_deserialize(buf);
+    if (bundle == NULL)
+        PGOTO_ERROR(FAIL, "Failed to deserialize object migration bundle");
+
+    BULKI_Entity *objs_array = BULKI_get(bundle, BULKI_singleton_ENTITY("metadata_objects", PDC_STRING));
+    if (objs_array == NULL || objs_array->pdc_type != PDC_BULKI)
+        PGOTO_ERROR(FAIL, "Missing metadata_objects in migration bundle");
+
+    {
+        BULKI_Entity_Iterator *obj_iter = Bent_iterator_init(objs_array, NULL, PDC_BULKI);
+        while (Bent_iterator_has_next_BULKI(obj_iter)) {
+            BULKI *         metadata_obj = Bent_iterator_next_BULKI(obj_iter);
+            pdc_metadata_t *metadata     = NULL;
+
+            if (rescale_parse_obj_from_bulki(metadata_obj, &metadata, NULL) != SUCCEED)
+                PGOTO_ERROR(FAIL, "Failed to parse migrated metadata object");
+            if (rescale_insert_metadata(metadata) != SUCCEED) {
+                rescale_free_one_metadata(metadata);
+                PGOTO_ERROR(FAIL, "Failed to insert migrated metadata object");
+            }
+            if (n_inserted)
+                (*n_inserted)++;
+        }
+    }
+
+done:
+    if (bundle != NULL)
+        BULKI_free(bundle, 1);
+    FUNC_LEAVE(ret_value);
+}
+
+/*
+ * Migrate temp objects to N_new home ranks; insert into metadata_hash_table_g.
+ * Containers remain in temp holders for T9.
+ */
+static perr_t
+PDC_Server_rescale_migrate_objects(int n_new)
+{
+    FUNC_ENTER(NULL);
+
+    perr_t          ret_value      = SUCCEED;
+    pdc_metadata_t *obj            = NULL;
+    pdc_metadata_t *obj_tmp        = NULL;
+    int             before_local   = 0;
+    int             before_global  = 0;
+    int             after_local    = 0;
+    int             after_global   = 0;
+    int             n_inserted     = 0;
+#ifdef ENABLE_MPI
+    int *           sendcounts     = NULL;
+    int *           recvcounts     = NULL;
+    int *           sdispls        = NULL;
+    int *           rdispls        = NULL;
+    int *           dest_nobj      = NULL;
+    void **         dest_bufs      = NULL;
+    BULKI **        dest_bundles   = NULL;
+    BULKI_Entity ** dest_arrays    = NULL;
+    char *          sendbuf        = NULL;
+    char *          recvbuf        = NULL;
+    int             total_send     = 0;
+    int             total_recv     = 0;
+    int             r;
+#endif
+
+    before_local = rescale_tmp_n_obj_g;
+#ifdef ENABLE_MPI
+    MPI_Allreduce(&before_local, &before_global, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+#else
+    before_global = before_local;
+#endif
+
+    if (pdc_server_rank_g == 0)
+        LOG_INFO("Elastic object migrate: %d objects before exchange (N_new=%d)\n", before_global, n_new);
+
+    if (metadata_hash_table_g == NULL) {
+        if (PDC_Server_init_hash_table() != SUCCEED)
+            PGOTO_ERROR(FAIL, "Error with PDC_Server_init_hash_table during elastic migrate");
+    }
+
+#ifndef ENABLE_MPI
+    /* Non-MPI: n_new must be 1; insert all local objects. */
+    (void)n_new;
+    DL_FOREACH_SAFE(rescale_tmp_objs_g, obj, obj_tmp)
+    {
+        DL_DELETE(rescale_tmp_objs_g, obj);
+        if (rescale_insert_metadata(obj) != SUCCEED)
+            PGOTO_ERROR(FAIL, "Failed to insert local object during non-MPI elastic migrate");
+        n_inserted++;
+    }
+    rescale_tmp_n_obj_g    = 0;
+    rescale_tmp_n_region_g = 0;
+#else
+    if (n_new <= 0)
+        PGOTO_ERROR(FAIL, "Invalid n_new=%d for object migrate", n_new);
+
+    sendcounts   = (int *)PDC_calloc((size_t)n_new, sizeof(int));
+    recvcounts   = (int *)PDC_calloc((size_t)n_new, sizeof(int));
+    sdispls      = (int *)PDC_calloc((size_t)n_new, sizeof(int));
+    rdispls      = (int *)PDC_calloc((size_t)n_new, sizeof(int));
+    dest_nobj    = (int *)PDC_calloc((size_t)n_new, sizeof(int));
+    dest_bufs    = (void **)PDC_calloc((size_t)n_new, sizeof(void *));
+    dest_bundles = (BULKI **)PDC_calloc((size_t)n_new, sizeof(BULKI *));
+    dest_arrays  = (BULKI_Entity **)PDC_calloc((size_t)n_new, sizeof(BULKI_Entity *));
+    if (sendcounts == NULL || recvcounts == NULL || sdispls == NULL || rdispls == NULL || dest_nobj == NULL ||
+        dest_bufs == NULL || dest_bundles == NULL || dest_arrays == NULL)
+        PGOTO_ERROR(FAIL, "Cannot allocate MPI exchange state for object migrate");
+
+    /* First pass: count per-dest objects (excluding local inserts). */
+    DL_FOREACH(rescale_tmp_objs_g, obj)
+    {
+        int dest = (int)PDC_metadata_home_rank(obj->obj_name, obj->time_step, n_new);
+        if (dest < 0 || dest >= n_new)
+            PGOTO_ERROR(FAIL, "Invalid home rank %d for object %s", dest, obj->obj_name);
+        if (dest != pdc_server_rank_g)
+            dest_nobj[dest]++;
+    }
+
+    for (r = 0; r < n_new; r++) {
+        if (dest_nobj[r] <= 0)
+            continue;
+        dest_bundles[r] = BULKI_init(1);
+        dest_arrays[r]  = empty_BULKI_Array_Entity_with_capacity(dest_nobj[r]);
+    }
+
+    /* Second pass: local insert or pack into per-dest bundles. */
+    DL_FOREACH_SAFE(rescale_tmp_objs_g, obj, obj_tmp)
+    {
+        int dest = (int)PDC_metadata_home_rank(obj->obj_name, obj->time_step, n_new);
+
+        DL_DELETE(rescale_tmp_objs_g, obj);
+
+        if (dest == pdc_server_rank_g) {
+            if (rescale_insert_metadata(obj) != SUCCEED)
+                PGOTO_ERROR(FAIL, "Failed to insert local-home object during elastic migrate");
+            n_inserted++;
+            continue;
+        }
+
+        {
+            BULKI *packed = rescale_pack_metadata_obj(obj);
+            if (packed == NULL)
+                PGOTO_ERROR(FAIL, "Failed to pack metadata object for migrate");
+            BULKI_ENTITY_append_BULKI_incremental(dest_arrays[dest], packed);
+            /* Shell only: header/data ownership transferred into dest_arrays via memcpy. */
+            packed = (BULKI *)PDC_free(packed);
+            /* Object bytes are in the bundle; free local copy. */
+            rescale_free_one_metadata(obj);
+        }
+    }
+    rescale_tmp_n_obj_g    = 0;
+    rescale_tmp_n_region_g = 0;
+
+    for (r = 0; r < n_new; r++) {
+        size_t ser_size = 0;
+
+        if (dest_bundles[r] == NULL)
+            continue;
+
+        BULKI_put_incremental(dest_bundles[r], BULKI_singleton_ENTITY("metadata_objects", PDC_STRING),
+                              dest_arrays[r]);
+        dest_arrays[r] = NULL;
+
+        dest_bufs[r] = BULKI_serialize(dest_bundles[r], &ser_size);
+        BULKI_free(dest_bundles[r], 1);
+        dest_bundles[r] = NULL;
+
+        if (dest_bufs[r] == NULL)
+            PGOTO_ERROR(FAIL, "Failed to serialize object migrate bundle for dest %d", r);
+        if (ser_size > (size_t)INT_MAX)
+            PGOTO_ERROR(FAIL, "Object migrate bundle too large for MPI counts");
+        sendcounts[r] = (int)ser_size;
+    }
+
+    MPI_Alltoall(sendcounts, 1, MPI_INT, recvcounts, 1, MPI_INT, MPI_COMM_WORLD);
+
+    total_send = 0;
+    total_recv = 0;
+    for (r = 0; r < n_new; r++) {
+        sdispls[r] = total_send;
+        rdispls[r] = total_recv;
+        total_send += sendcounts[r];
+        total_recv += recvcounts[r];
+    }
+
+    if (total_send > 0) {
+        sendbuf = (char *)PDC_malloc((size_t)total_send);
+        if (sendbuf == NULL)
+            PGOTO_ERROR(FAIL, "Cannot allocate Alltoallv send buffer");
+        for (r = 0; r < n_new; r++) {
+            if (sendcounts[r] > 0 && dest_bufs[r] != NULL) {
+                memcpy(sendbuf + sdispls[r], dest_bufs[r], (size_t)sendcounts[r]);
+                dest_bufs[r] = PDC_free(dest_bufs[r]);
+            }
+        }
+    }
+    for (r = 0; r < n_new; r++) {
+        if (dest_bufs[r] != NULL)
+            dest_bufs[r] = PDC_free(dest_bufs[r]);
+    }
+
+    if (total_recv > 0) {
+        recvbuf = (char *)PDC_malloc((size_t)total_recv);
+        if (recvbuf == NULL)
+            PGOTO_ERROR(FAIL, "Cannot allocate Alltoallv recv buffer");
+    }
+
+    {
+        char dummy = 0;
+        MPI_Alltoallv(total_send > 0 ? sendbuf : &dummy, sendcounts, sdispls, MPI_BYTE,
+                      total_recv > 0 ? recvbuf : &dummy, recvcounts, rdispls, MPI_BYTE, MPI_COMM_WORLD);
+    }
+
+    if (sendbuf != NULL)
+        sendbuf = (char *)PDC_free(sendbuf);
+
+    for (r = 0; r < n_new; r++) {
+        if (recvcounts[r] <= 0)
+            continue;
+        if (rescale_ingest_obj_bundle(recvbuf + rdispls[r], recvcounts[r], &n_inserted) != SUCCEED)
+            PGOTO_ERROR(FAIL, "Failed to ingest migrated objects from rank %d", r);
+    }
+
+    if (recvbuf != NULL)
+        recvbuf = (char *)PDC_free(recvbuf);
+#endif /* ENABLE_MPI */
+
+    after_local = n_inserted;
+#ifdef ENABLE_MPI
+    MPI_Allreduce(&after_local, &after_global, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+#else
+    after_global = after_local;
+#endif
+
+    LOG_INFO("Rank %d inserted %d objects after elastic migrate\n", pdc_server_rank_g, after_local);
+
+    if (pdc_server_rank_g == 0)
+        LOG_INFO("Elastic object migrate complete: %d objects before, %d after\n", before_global,
+                 after_global);
+
+    if (before_global != after_global)
+        PGOTO_ERROR(FAIL, "Object count mismatch after elastic migrate (%d before, %d after)", before_global,
+                    after_global);
+
+done:
+#ifdef ENABLE_MPI
+    if (ret_value != SUCCEED) {
+        for (r = 0; r < n_new; r++) {
+            if (dest_bufs != NULL && dest_bufs[r] != NULL)
+                dest_bufs[r] = PDC_free(dest_bufs[r]);
+            if (dest_bundles != NULL && dest_bundles[r] != NULL) {
+                BULKI_free(dest_bundles[r], 1);
+                dest_bundles[r] = NULL;
+            }
+            if (dest_arrays != NULL && dest_arrays[r] != NULL) {
+                BULKI_Entity_free(dest_arrays[r], 1);
+                dest_arrays[r] = NULL;
+            }
+        }
+        if (sendbuf != NULL)
+            sendbuf = (char *)PDC_free(sendbuf);
+        if (recvbuf != NULL)
+            recvbuf = (char *)PDC_free(recvbuf);
+        /* Leftover temp objects not yet migrated */
+        PDC_Server_rescale_free_tmp_objs();
+    }
+    if (sendcounts != NULL)
+        sendcounts = (int *)PDC_free(sendcounts);
+    if (recvcounts != NULL)
+        recvcounts = (int *)PDC_free(recvcounts);
+    if (sdispls != NULL)
+        sdispls = (int *)PDC_free(sdispls);
+    if (rdispls != NULL)
+        rdispls = (int *)PDC_free(rdispls);
+    if (dest_nobj != NULL)
+        dest_nobj = (int *)PDC_free(dest_nobj);
+    if (dest_bufs != NULL)
+        dest_bufs = (void **)PDC_free(dest_bufs);
+    if (dest_bundles != NULL)
+        dest_bundles = (BULKI **)PDC_free(dest_bundles);
+    if (dest_arrays != NULL)
+        dest_arrays = (BULKI_Entity **)PDC_free(dest_arrays);
+#else
+    if (ret_value != SUCCEED)
+        PDC_Server_rescale_free_tmp_objs();
+#endif
     FUNC_LEAVE(ret_value);
 }
 
@@ -697,13 +1194,24 @@ PDC_Server_restart_elastic(int n_old, int n_new)
     MPI_Barrier(MPI_COMM_WORLD);
 #endif
 
-    /* Migration not implemented yet (T8–T10). Holders remain until free on process exit/error path. */
+    ret_value = PDC_Server_rescale_migrate_objects(n_new);
+    if (ret_value != SUCCEED) {
+        PDC_Server_rescale_free_tmp_conts();
+        PGOTO_ERROR(FAIL, "Elastic object migration failed");
+    }
+
+    /* Objects now live in metadata_hash_table_g — do not free them. */
+    if (rescale_tmp_objs_g != NULL)
+        PDC_Server_rescale_free_tmp_objs();
+
+    /* T9/T10 not done yet: free temp containers and fail clearly. */
+    PDC_Server_rescale_free_tmp_conts();
     if (pdc_server_rank_g == 0)
-        LOG_ERROR("Elastic metadata migration (%d -> %d) is not implemented yet "
-                  "(shard validation and temp load succeeded)\n",
+        LOG_ERROR("Elastic container migration and server.cfg gating (%d -> %d) "
+                  "are not implemented yet (object migration succeeded)\n",
                   n_old, n_new);
-    PDC_Server_rescale_free_tmp_holders();
-    PGOTO_ERROR(FAIL, "Elastic server restart not implemented");
+    PGOTO_ERROR(FAIL,
+                "Elastic server restart incomplete: container migration / server.cfg gating pending (T9/T10)");
 
 done:
     FUNC_LEAVE(ret_value);

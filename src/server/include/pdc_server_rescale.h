@@ -31,9 +31,8 @@
  * Restart with a different server count than the checkpoint (elastic).
  *
  * Eagerly repartitions metadata from N_old checkpoint shards onto N_new ranks.
- * Migration phases (shard validation, load, MPI exchange) are implemented in
- * follow-on tasks; this entry point currently validates arguments and returns
- * FAIL until those land.
+ * Object migration (T8) is implemented; container migration and server.cfg
+ * gating (T9/T10) still return FAIL after objects are placed.
  *
  * \param n_old [IN] Server count at checkpoint time
  * \param n_new [IN] Current server MPI size
