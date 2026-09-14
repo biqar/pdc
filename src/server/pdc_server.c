@@ -1627,8 +1627,7 @@ PDC_Server_get_checkpoint_server_count(const char *filename, int n_new, uint32_t
     if (checkpoint_bulki == NULL)
         PGOTO_ERROR(FAIL, "Failed to deserialize checkpoint for server count: [%s]", filename);
 
-    count_entity =
-        BULKI_get(checkpoint_bulki, BULKI_singleton_ENTITY("checkpoint_server_count", PDC_STRING));
+    count_entity = BULKI_get(checkpoint_bulki, BULKI_singleton_ENTITY("checkpoint_server_count", PDC_STRING));
     if (count_entity == NULL || count_entity->data == NULL) {
         LOG_ERROR("checkpoint_server_count missing in [%s]; assuming N_old = N_new (%d); "
                   "elastic rescale unsupported for this checkpoint\n",
