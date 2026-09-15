@@ -1007,10 +1007,7 @@ drc_access_again:
             if (ret_value != SUCCEED)
                 PGOTO_ERROR(FAIL, "Error with PDC_Server_restart_elastic (%u -> %d)", n_old,
                             pdc_server_size_g);
-            /* Do not restore N_old transfer-query arrays; re-init empty for N_new. */
-            ret_value = transfer_request_metadata_query_init_bulki(pdc_server_size_g, NULL);
-            if (ret_value != SUCCEED)
-                PGOTO_ERROR(FAIL, "Failed to init transfer-query after elastic restart");
+            /* Transfer-query is remapped and installed inside restart_elastic. */
         }
     }
     else {

@@ -190,6 +190,66 @@ done:
     FUNC_LEAVE(ret_value);
 }
 
+static void
+transfer_request_metadata_query_remap_and_rebuild_bytes(int n_new)
+{
+    FUNC_ENTER(NULL);
+
+    pdc_obj_metadata_pkg *   obj_temp;
+    pdc_region_metadata_pkg *region_temp;
+    int                      i;
+
+    if (data_server_bytes == NULL || n_new <= 0)
+        FUNC_LEAVE_VOID();
+
+    memset(data_server_bytes, 0, (size_t)n_new * sizeof(uint64_t));
+
+    obj_temp = metadata_server_objs;
+    while (obj_temp) {
+        region_temp = obj_temp->regions;
+        while (region_temp) {
+            uint64_t total_reg_size = 1;
+
+            region_temp->data_server_id = region_temp->data_server_id % (uint32_t)n_new;
+
+            for (i = 0; i < obj_temp->ndim; ++i)
+                total_reg_size *= region_temp->reg_size[i];
+
+            data_server_bytes[region_temp->data_server_id] += total_reg_size;
+            region_temp = region_temp->next;
+        }
+        obj_temp = obj_temp->next;
+    }
+
+    FUNC_LEAVE_VOID();
+}
+
+/**
+ * Elastic restart install: init for n_new, load checkpointed objects, remap each
+ * region's data_server_id with (id % n_new), and rebuild load counters from
+ * region extents (unit=1). checkpoint_bulki may be NULL for empty init.
+ */
+perr_t
+transfer_request_metadata_query_init_elastic_bulki(int n_new, BULKI *checkpoint_bulki)
+{
+    FUNC_ENTER(NULL);
+
+    perr_t ret_value = SUCCEED;
+
+    if (n_new <= 0)
+        PGOTO_ERROR(FAIL, "Invalid n_new=%d for elastic transfer-query init", n_new);
+
+    ret_value = transfer_request_metadata_query_init_bulki(n_new, checkpoint_bulki);
+    if (ret_value != SUCCEED)
+        PGOTO_ERROR(FAIL, "transfer_request_metadata_query_init_bulki failed during elastic init");
+
+    if (checkpoint_bulki != NULL)
+        transfer_request_metadata_query_remap_and_rebuild_bytes(n_new);
+
+done:
+    FUNC_LEAVE(ret_value);
+}
+
 /**
  * Entry function for this class. Should be only called once at the beginning of Server init.
  * If checkpoint is not NULL, then load previously checkpointed metadata to static variables.
