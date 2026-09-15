@@ -84,13 +84,13 @@ static int rescale_validated_n_old_g = -1;
 static int rescale_validated_n_new_g = -1;
 
 /* Temporary holders (T7) — not published to hash tables until migrate (T8/T9) */
-static pdc_metadata_t *        rescale_tmp_objs_g     = NULL;
-static int                     rescale_tmp_n_obj_g    = 0;
-static int                     rescale_tmp_n_region_g = 0;
-static pdc_rescale_tmp_cont_t *rescale_tmp_conts_g    = NULL;
-static int                     rescale_tmp_n_cont_g   = 0;
-static pdc_rescale_tmp_tq_obj_t *rescale_tmp_tq_g     = NULL;
-static int                       rescale_tmp_n_tq_g   = 0;
+static pdc_metadata_t *          rescale_tmp_objs_g     = NULL;
+static int                       rescale_tmp_n_obj_g    = 0;
+static int                       rescale_tmp_n_region_g = 0;
+static pdc_rescale_tmp_cont_t *  rescale_tmp_conts_g    = NULL;
+static int                       rescale_tmp_n_cont_g   = 0;
+static pdc_rescale_tmp_tq_obj_t *rescale_tmp_tq_g       = NULL;
+static int                       rescale_tmp_n_tq_g     = 0;
 
 /* Session-lifetime obj_id/cont_id → home_rank after elastic migrate (NULL = inactive). */
 static HashTable *obj_id_home_map_g = NULL;
@@ -392,10 +392,9 @@ PDC_Server_rescale_recompute_id_seq(void)
     }
 
     if (next_id >= limit)
-        PGOTO_ERROR(FAIL,
-                    "Rank %d ID interval exhausted after elastic restore (next=%" PRIu64 ", limit=%" PRIu64
-                    ")",
-                    pdc_server_rank_g, next_id, limit);
+        PGOTO_ERROR(
+            FAIL, "Rank %d ID interval exhausted after elastic restore (next=%" PRIu64 ", limit=%" PRIu64 ")",
+            pdc_server_rank_g, next_id, limit);
 
     pdc_id_seq_g = next_id;
 
@@ -572,10 +571,10 @@ rescale_free_one_tmp_tq(pdc_rescale_tmp_tq_obj_t *obj)
 
     reg = obj->regions;
     while (reg) {
-        reg_tmp            = reg->next;
+        reg_tmp              = reg->next;
         reg->reg_offset_size = (uint64_t *)PDC_free(reg->reg_offset_size);
-        reg                = (pdc_rescale_tmp_tq_region_t *)PDC_free(reg);
-        reg                = reg_tmp;
+        reg                  = (pdc_rescale_tmp_tq_region_t *)PDC_free(reg);
+        reg                  = reg_tmp;
     }
     obj = (pdc_rescale_tmp_tq_obj_t *)PDC_free(obj);
 
@@ -1406,17 +1405,16 @@ rescale_load_one_shard(int shard_rank, int n_old)
         BULKI_Entity *tq_ent =
             BULKI_get(checkpoint_bulki, BULKI_singleton_ENTITY("transfer_query", PDC_STRING));
         if (tq_ent != NULL && tq_ent->pdc_type == PDC_BULKI && tq_ent->data != NULL) {
-            BULKI *       tq_bulki = (BULKI *)tq_ent->data;
-            BULKI_Entity *objects_array =
-                BULKI_get(tq_bulki, BULKI_singleton_ENTITY("objects", PDC_STRING));
+            BULKI *       tq_bulki      = (BULKI *)tq_ent->data;
+            BULKI_Entity *objects_array = BULKI_get(tq_bulki, BULKI_singleton_ENTITY("objects", PDC_STRING));
 
             if (objects_array != NULL && objects_array->pdc_type == PDC_BULKI) {
                 BULKI_Entity_Iterator *obj_iter = Bent_iterator_init(objects_array, NULL, PDC_BULKI);
                 while (Bent_iterator_has_next_BULKI(obj_iter)) {
-                    BULKI *                     obj_bulki = Bent_iterator_next_BULKI(obj_iter);
-                    pdc_rescale_tmp_tq_obj_t *  tmp_obj   = NULL;
-                    int                         ndim      = 0;
-                    uint64_t                    obj_id    = 0;
+                    BULKI *                   obj_bulki = Bent_iterator_next_BULKI(obj_iter);
+                    pdc_rescale_tmp_tq_obj_t *tmp_obj   = NULL;
+                    int                       ndim      = 0;
+                    uint64_t                  obj_id    = 0;
 
                     BULKI_Entity *obj_id_ent =
                         BULKI_get(obj_bulki, BULKI_singleton_ENTITY("obj_id", PDC_STRING));
@@ -1426,8 +1424,7 @@ rescale_load_one_shard(int shard_rank, int n_old)
                     }
                     memcpy(&obj_id, obj_id_ent->data, sizeof(uint64_t));
 
-                    BULKI_Entity *ndim_ent =
-                        BULKI_get(obj_bulki, BULKI_singleton_ENTITY("ndim", PDC_STRING));
+                    BULKI_Entity *ndim_ent = BULKI_get(obj_bulki, BULKI_singleton_ENTITY("ndim", PDC_STRING));
                     if (ndim_ent == NULL || ndim_ent->data == NULL)
                         PGOTO_ERROR(FAIL, "Missing ndim in transfer_query of [%s]", path);
                     memcpy(&ndim, ndim_ent->data, sizeof(int));
@@ -1444,12 +1441,11 @@ rescale_load_one_shard(int shard_rank, int n_old)
                     BULKI_Entity *regions_array =
                         BULKI_get(obj_bulki, BULKI_singleton_ENTITY("regions", PDC_STRING));
                     if (regions_array != NULL && regions_array->pdc_type == PDC_BULKI) {
-                        BULKI_Entity_Iterator *reg_iter =
-                            Bent_iterator_init(regions_array, NULL, PDC_BULKI);
+                        BULKI_Entity_Iterator *reg_iter = Bent_iterator_init(regions_array, NULL, PDC_BULKI);
                         while (Bent_iterator_has_next_BULKI(reg_iter)) {
-                            BULKI *                       region_bulki = Bent_iterator_next_BULKI(reg_iter);
-                            pdc_rescale_tmp_tq_region_t * reg_pkg      = NULL;
-                            uint32_t                      ds_id        = 0;
+                            BULKI *                      region_bulki = Bent_iterator_next_BULKI(reg_iter);
+                            pdc_rescale_tmp_tq_region_t *reg_pkg      = NULL;
+                            uint32_t                     ds_id        = 0;
 
                             BULKI_Entity *server_id_ent =
                                 BULKI_get(region_bulki, BULKI_singleton_ENTITY("data_server_id", PDC_STRING));
@@ -1467,11 +1463,11 @@ rescale_load_one_shard(int shard_rank, int n_old)
                             if (offset_size_ent == NULL || offset_size_ent->data == NULL)
                                 PGOTO_ERROR(FAIL, "Missing reg_offset_size in transfer_query of [%s]", path);
                             if ((size_t)offset_size_ent->count != (size_t)ndim * 2)
-                                PGOTO_ERROR(FAIL,
-                                            "Invalid reg_offset_size count in transfer_query of [%s]", path);
+                                PGOTO_ERROR(FAIL, "Invalid reg_offset_size count in transfer_query of [%s]",
+                                            path);
 
-                            reg_pkg =
-                                (pdc_rescale_tmp_tq_region_t *)PDC_calloc(1, sizeof(pdc_rescale_tmp_tq_region_t));
+                            reg_pkg = (pdc_rescale_tmp_tq_region_t *)PDC_calloc(
+                                1, sizeof(pdc_rescale_tmp_tq_region_t));
                             if (reg_pkg == NULL)
                                 PGOTO_ERROR(FAIL, "Cannot allocate transfer_query temp region");
                             reg_pkg->data_server_id = ds_id;
@@ -1503,8 +1499,8 @@ rescale_load_one_shard(int shard_rank, int n_old)
 
     rescale_tmp_n_region_g += n_region_shard;
     LOG_INFO("Rank %d loaded shard %d into temp holders (%d objs, %d regions, %d conts, %d tq objs)\n",
-             pdc_server_rank_g, shard_rank, rescale_tmp_n_obj_g, rescale_tmp_n_region_g,
-             rescale_tmp_n_cont_g, rescale_tmp_n_tq_g);
+             pdc_server_rank_g, shard_rank, rescale_tmp_n_obj_g, rescale_tmp_n_region_g, rescale_tmp_n_cont_g,
+             rescale_tmp_n_tq_g);
 
 done:
     if (checkpoint_bulki != NULL)
@@ -2186,13 +2182,14 @@ rescale_tq_merge_obj(pdc_rescale_tmp_tq_obj_t **head, pdc_rescale_tmp_tq_obj_t *
     for (cur = *head; cur != NULL; cur = cur->next) {
         if (cur->obj_id == incoming->obj_id) {
             if (cur->ndim != incoming->ndim)
-                PGOTO_ERROR(FAIL, "ndim mismatch merging transfer_query for obj_id %" PRIu64, incoming->obj_id);
+                PGOTO_ERROR(FAIL, "ndim mismatch merging transfer_query for obj_id %" PRIu64,
+                            incoming->obj_id);
             if (incoming->regions != NULL) {
                 if (cur->regions_end != NULL)
                     cur->regions_end->next = incoming->regions;
                 else
                     cur->regions = incoming->regions;
-                cur->regions_end     = incoming->regions_end;
+                cur->regions_end      = incoming->regions_end;
                 incoming->regions     = NULL;
                 incoming->regions_end = NULL;
             }
@@ -2232,10 +2229,10 @@ rescale_ingest_tq_bundle(void *buf, int buf_size, pdc_rescale_tmp_tq_obj_t **ass
     {
         BULKI_Entity_Iterator *obj_iter = Bent_iterator_init(objs_array, NULL, PDC_BULKI);
         while (Bent_iterator_has_next_BULKI(obj_iter)) {
-            BULKI *                    obj_bulki = Bent_iterator_next_BULKI(obj_iter);
-            pdc_rescale_tmp_tq_obj_t * tmp_obj   = NULL;
-            uint64_t                   obj_id    = 0;
-            int                        ndim      = 0;
+            BULKI *                   obj_bulki = Bent_iterator_next_BULKI(obj_iter);
+            pdc_rescale_tmp_tq_obj_t *tmp_obj   = NULL;
+            uint64_t                  obj_id    = 0;
+            int                       ndim      = 0;
 
             BULKI_Entity *obj_id_ent = BULKI_get(obj_bulki, BULKI_singleton_ENTITY("obj_id", PDC_STRING));
             if (obj_id_ent == NULL || obj_id_ent->data == NULL)
@@ -2288,14 +2285,14 @@ PDC_Server_rescale_migrate_transfer_query(int n_new)
 {
     FUNC_ENTER(NULL);
 
-    perr_t                     ret_value   = SUCCEED;
-    pdc_rescale_tmp_tq_obj_t * assembled   = NULL;
-    pdc_rescale_tmp_tq_obj_t * obj         = NULL;
-    pdc_rescale_tmp_tq_obj_t * obj_tmp     = NULL;
-    int                        before_local = 0;
-    int                        n_dropped    = 0;
-    int                        n_assembled  = 0;
-    BULKI *                    install_bulki = NULL;
+    perr_t                    ret_value     = SUCCEED;
+    pdc_rescale_tmp_tq_obj_t *assembled     = NULL;
+    pdc_rescale_tmp_tq_obj_t *obj           = NULL;
+    pdc_rescale_tmp_tq_obj_t *obj_tmp       = NULL;
+    int                       before_local  = 0;
+    int                       n_dropped     = 0;
+    int                       n_assembled   = 0;
+    BULKI *                   install_bulki = NULL;
 #ifdef ENABLE_MPI
     int *          sendcounts   = NULL;
     int *          recvcounts   = NULL;
@@ -2325,9 +2322,9 @@ PDC_Server_rescale_migrate_transfer_query(int n_new)
 #ifndef ENABLE_MPI
     (void)n_new;
     while (rescale_tmp_tq_g != NULL) {
-        obj               = rescale_tmp_tq_g;
-        rescale_tmp_tq_g  = obj->next;
-        obj->next         = NULL;
+        obj              = rescale_tmp_tq_g;
+        rescale_tmp_tq_g = obj->next;
+        obj->next        = NULL;
         if (rescale_tq_merge_obj(&assembled, obj) != SUCCEED)
             PGOTO_ERROR(FAIL, "Failed to assemble local transfer_query object");
         n_assembled++;
@@ -2376,9 +2373,9 @@ PDC_Server_rescale_migrate_transfer_query(int n_new)
         uint32_t home = 0;
         int      dest;
 
-        obj_tmp            = obj->next;
-        obj->next          = NULL;
-        rescale_tmp_tq_g   = obj_tmp;
+        obj_tmp          = obj->next;
+        obj->next        = NULL;
+        rescale_tmp_tq_g = obj_tmp;
 
         if (!PDC_Server_lookup_obj_id_home(obj->obj_id, &home)) {
             LOG_ERROR("Dropping transfer_query for obj_id %" PRIu64 " (no home in elastic map)\n",
@@ -2485,15 +2482,15 @@ PDC_Server_rescale_migrate_transfer_query(int n_new)
 
     /* Build checkpoint-shaped BULKI for local install. */
     {
-        int                          n_local = 0;
-        pdc_rescale_tmp_tq_obj_t *   cur;
-        BULKI_Entity *               objects_array;
+        int                       n_local = 0;
+        pdc_rescale_tmp_tq_obj_t *cur;
+        BULKI_Entity *            objects_array;
 
         for (cur = assembled; cur != NULL; cur = cur->next)
             n_local++;
 
-        install_bulki  = BULKI_init(1);
-        objects_array  = empty_BULKI_Array_Entity_with_capacity(n_local > 0 ? n_local : 1);
+        install_bulki = BULKI_init(1);
+        objects_array = empty_BULKI_Array_Entity_with_capacity(n_local > 0 ? n_local : 1);
         for (cur = assembled; cur != NULL; cur = cur->next) {
             BULKI *packed = rescale_pack_tq_obj(cur);
             if (packed == NULL)
@@ -2519,7 +2516,7 @@ done:
     if (install_bulki != NULL)
         BULKI_free(install_bulki, 1);
     while (assembled != NULL) {
-        obj_tmp   = assembled->next;
+        obj_tmp = assembled->next;
         rescale_free_one_tmp_tq(assembled);
         assembled = obj_tmp;
     }
@@ -2718,10 +2715,10 @@ PDC_Server_restart_elastic(int n_old, int n_new)
     if (ret_value != SUCCEED)
         PGOTO_ERROR(FAIL, "Elastic restart tmp dir setup failed");
 
-    /*
-     * Metadata tables are stable. Barrier so no rank returns early; caller
-     * (server_run) then publishes server.cfg with N_new via write_addr_to_file.
-     */
+        /*
+         * Metadata tables are stable. Barrier so no rank returns early; caller
+         * (server_run) then publishes server.cfg with N_new via write_addr_to_file.
+         */
 #ifdef ENABLE_MPI
     MPI_Barrier(MPI_COMM_WORLD);
 #endif

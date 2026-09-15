@@ -5,8 +5,8 @@
 #include "bulki_serde.h"
 #include "pdc_public.h"
 
-perr_t   transfer_request_metadata_query_init(int pdc_server_size_input, char *checkpoint);
-perr_t   transfer_request_metadata_query_init_bulki(int pdc_server_size_input, BULKI *checkpoint_bulki);
+perr_t transfer_request_metadata_query_init(int pdc_server_size_input, char *checkpoint);
+perr_t transfer_request_metadata_query_init_bulki(int pdc_server_size_input, BULKI *checkpoint_bulki);
 /**
  * Elastic restart install: init for n_new, load checkpointed objects, remap each
  * region's data_server_id with (id % n_new), and rebuild load counters from
