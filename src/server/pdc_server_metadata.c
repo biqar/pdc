@@ -319,7 +319,10 @@ PDC_Server_has_metadata(pdcid_t obj_id)
 {
     FUNC_ENTER(NULL);
 
-    if (obj_id / PDC_SERVER_ID_INTERVEL == (pdcid_t)pdc_server_rank_g + 1)
+    /* Local ownership: present in this rank's metadata table (not creation-rank from obj_id).
+     * Required after elastic migrate where home rank may differ from creation rank.
+     */
+    if (find_metadata_by_id(obj_id) != NULL)
         FUNC_LEAVE(1);
 
     FUNC_LEAVE(0);
