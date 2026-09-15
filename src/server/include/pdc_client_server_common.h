@@ -4325,10 +4325,14 @@ perr_t PDC_Server_add_tag_metadata(metadata_add_tag_in_t *in, metadata_add_tag_o
 perr_t PDC_get_self_addr(hg_class_t *hg_class, char *self_addr_string);
 
 /**
- * Get the server ID
+ * Get the server ID that owns metadata for an object/container ID.
+ *
+ * Legacy formula uses creation rank encoded in the ID. On PDC servers after
+ * an elastic restart, a session map overrides this when the ID was migrated.
+ * Clients and same-N sessions keep the legacy formula (client map is T18).
  *
  * \param obj_id [IN]           Object ID
- * \param n_server [OUT]        Total number of server
+ * \param n_server [IN]         Total number of servers
  *
  * \return Server ID
  */

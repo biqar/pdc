@@ -42,4 +42,18 @@
  */
 perr_t PDC_Server_restart_elastic(int n_old, int n_new);
 
+/**
+ * Look up post-elastic home rank for an object/container ID.
+ *
+ * Only populated after a successful elastic restart on this process.
+ * Returns 1 and sets *home_out on hit; returns 0 if the map is inactive
+ * or the ID is not present (e.g. newly created after migrate — use legacy).
+ *
+ * \param obj_id [IN]   Object or container ID
+ * \param home_out [OUT] Home rank under N_new when found
+ *
+ * \return 1 if found, 0 otherwise
+ */
+int PDC_Server_lookup_obj_id_home(uint64_t obj_id, uint32_t *home_out);
+
 #endif /* PDC_SERVER_RESCALE_H */

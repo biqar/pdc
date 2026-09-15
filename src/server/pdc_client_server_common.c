@@ -38,6 +38,10 @@
 #include "pdc_logger.h"
 #include "pdc_timing.h"
 
+#ifdef IS_PDC_SERVER
+#include "pdc_server_rescale.h"
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
@@ -215,8 +219,24 @@ PDC_get_server_by_obj_id(uint64_t obj_id, int n_server)
 {
     FUNC_ENTER(NULL);
 
-    // TODO: need a smart way to deal with server number change
     uint32_t ret_value = 0;
+
+#ifdef IS_PDC_SERVER
+    /*
+     * After elastic restart, creation rank encoded in obj_id may differ from
+     * metadata home. Consult the server-side map built during migration.
+     * Misses (e.g. IDs created after migrate) fall through to the legacy formula.
+     */
+    {
+        uint32_t home = 0;
+
+        if (PDC_Server_lookup_obj_id_home(obj_id, &home)) {
+            if (n_server > 0)
+                home %= (uint32_t)n_server;
+            FUNC_LEAVE(home);
+        }
+    }
+#endif
 
     ret_value = (uint32_t)(obj_id / PDC_SERVER_ID_INTERVEL) - 1;
     ret_value %= n_server;

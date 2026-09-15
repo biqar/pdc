@@ -29,6 +29,7 @@
 #include <limits.h>
 #include <errno.h>
 #include <sys/stat.h>
+#include <inttypes.h>
 
 #include "pdc_config.h"
 #include "pdc_interface.h"
@@ -38,6 +39,7 @@
 #include "pdc_server_metadata.h"
 #include "pdc_client_server_common.h"
 #include "pdc_logger.h"
+#include "pdc_hash_table.h"
 #include "bulki.h"
 #include "bulki_serde.h"
 
@@ -70,6 +72,252 @@ static int                     rescale_tmp_n_obj_g    = 0;
 static int                     rescale_tmp_n_region_g = 0;
 static pdc_rescale_tmp_cont_t *rescale_tmp_conts_g    = NULL;
 static int                     rescale_tmp_n_cont_g   = 0;
+
+/* Session-lifetime obj_id/cont_id → home_rank after elastic migrate (NULL = inactive). */
+static HashTable *obj_id_home_map_g = NULL;
+
+static unsigned int
+rescale_obj_id_hash(void *vlocation)
+{
+    FUNC_ENTER(NULL);
+
+    uint64_t v = *((uint64_t *)vlocation);
+
+    FUNC_LEAVE((unsigned int)(v ^ (v >> 32)));
+}
+
+static int
+rescale_obj_id_equal(void *vlocation1, void *vlocation2)
+{
+    FUNC_ENTER(NULL);
+    FUNC_LEAVE(*((uint64_t *)vlocation1) == *((uint64_t *)vlocation2));
+}
+
+static void
+rescale_obj_id_key_free(void *key)
+{
+    FUNC_ENTER(NULL);
+    key = (void *)PDC_free((uint64_t *)key);
+    FUNC_LEAVE_VOID();
+}
+
+static void
+rescale_obj_id_value_free(void *value)
+{
+    FUNC_ENTER(NULL);
+    value = (void *)PDC_free((uint32_t *)value);
+    FUNC_LEAVE_VOID();
+}
+
+static void
+PDC_Server_rescale_free_obj_id_home_map(void)
+{
+    FUNC_ENTER(NULL);
+
+    if (obj_id_home_map_g != NULL) {
+        hash_table_free(obj_id_home_map_g);
+        obj_id_home_map_g = NULL;
+    }
+
+    FUNC_LEAVE_VOID();
+}
+
+static perr_t
+rescale_map_insert(uint64_t obj_id, uint32_t home)
+{
+    FUNC_ENTER(NULL);
+
+    perr_t    ret_value = SUCCEED;
+    uint64_t *key       = NULL;
+    uint32_t *val       = NULL;
+
+    if (obj_id_home_map_g == NULL)
+        PGOTO_ERROR(FAIL, "obj_id home map not initialized");
+
+    if (hash_table_lookup(obj_id_home_map_g, &obj_id) != NULL)
+        PGOTO_DONE(SUCCEED);
+
+    key = (uint64_t *)PDC_malloc(sizeof(uint64_t));
+    val = (uint32_t *)PDC_malloc(sizeof(uint32_t));
+    if (key == NULL || val == NULL)
+        PGOTO_ERROR(FAIL, "Cannot allocate obj_id home map entry");
+    *key = obj_id;
+    *val = home;
+
+    if (hash_table_insert(obj_id_home_map_g, key, val) != 1)
+        PGOTO_ERROR(FAIL, "Failed to insert obj_id %" PRIu64 " -> home %u into map", obj_id, home);
+    key = NULL;
+    val = NULL;
+
+done:
+    if (ret_value != SUCCEED) {
+        if (key != NULL)
+            key = (uint64_t *)PDC_free(key);
+        if (val != NULL)
+            val = (uint32_t *)PDC_free(val);
+    }
+    FUNC_LEAVE(ret_value);
+}
+
+/*
+ * After migrate, each rank owns exactly the metadata for home == my_rank.
+ * Gather all local IDs cluster-wide so every rank can resolve any migrated ID.
+ * Includes container IDs (same PDC_get_server_by_obj_id routing).
+ */
+static perr_t
+PDC_Server_rescale_build_obj_id_home_map(int n_new)
+{
+    FUNC_ENTER(NULL);
+
+    perr_t            ret_value   = SUCCEED;
+    uint64_t *        local_ids   = NULL;
+    uint64_t *        all_ids     = NULL;
+    int *             recvcounts  = NULL;
+    int *             displs      = NULL;
+    int               local_count = 0;
+    int               total_count = 0;
+    int               i, r;
+    HashTableIterator iter;
+    HashTablePair     pair;
+
+    PDC_Server_rescale_free_obj_id_home_map();
+
+    obj_id_home_map_g = hash_table_new(rescale_obj_id_hash, rescale_obj_id_equal);
+    if (obj_id_home_map_g == NULL)
+        PGOTO_ERROR(FAIL, "Cannot create obj_id home map");
+    hash_table_register_free_functions(obj_id_home_map_g, rescale_obj_id_key_free, rescale_obj_id_value_free);
+
+    /* Count local object + container IDs. */
+    if (metadata_hash_table_g != NULL) {
+        hash_table_iterate(metadata_hash_table_g, &iter);
+        while (hash_table_iter_has_more(&iter)) {
+            pdc_hash_table_entry_head *head;
+            pdc_metadata_t *           elt;
+
+            pair = hash_table_iter_next(&iter);
+            head = pair.value;
+            DL_FOREACH(head->metadata, elt)
+            {
+                local_count++;
+            }
+        }
+    }
+    if (container_hash_table_g != NULL)
+        local_count += (int)hash_table_num_entries(container_hash_table_g);
+
+    if (local_count > 0) {
+        local_ids = (uint64_t *)PDC_malloc((size_t)local_count * sizeof(uint64_t));
+        if (local_ids == NULL)
+            PGOTO_ERROR(FAIL, "Cannot allocate local obj_id list for home map");
+    }
+
+    i = 0;
+    if (metadata_hash_table_g != NULL) {
+        hash_table_iterate(metadata_hash_table_g, &iter);
+        while (hash_table_iter_has_more(&iter)) {
+            pdc_hash_table_entry_head *head;
+            pdc_metadata_t *           elt;
+
+            pair = hash_table_iter_next(&iter);
+            head = pair.value;
+            DL_FOREACH(head->metadata, elt)
+            {
+                if (i >= local_count)
+                    PGOTO_ERROR(FAIL, "Local obj_id count mismatch while building home map");
+                local_ids[i++] = elt->obj_id;
+            }
+        }
+    }
+    if (container_hash_table_g != NULL) {
+        hash_table_iterate(container_hash_table_g, &iter);
+        while (hash_table_iter_has_more(&iter)) {
+            pdc_cont_hash_table_entry_t *cent;
+
+            pair = hash_table_iter_next(&iter);
+            cent = pair.value;
+            if (i >= local_count)
+                PGOTO_ERROR(FAIL, "Local cont_id count mismatch while building home map");
+            local_ids[i++] = cent->cont_id;
+        }
+    }
+    if (i != local_count)
+        PGOTO_ERROR(FAIL, "Collected %d IDs but expected %d for home map", i, local_count);
+
+#ifdef ENABLE_MPI
+    recvcounts = (int *)PDC_calloc((size_t)n_new, sizeof(int));
+    displs     = (int *)PDC_calloc((size_t)n_new, sizeof(int));
+    if (recvcounts == NULL || displs == NULL)
+        PGOTO_ERROR(FAIL, "Cannot allocate MPI state for obj_id home map");
+
+    MPI_Allgather(&local_count, 1, MPI_INT, recvcounts, 1, MPI_INT, MPI_COMM_WORLD);
+
+    total_count = 0;
+    for (r = 0; r < n_new; r++) {
+        displs[r] = total_count;
+        total_count += recvcounts[r];
+    }
+
+    if (total_count > 0) {
+        all_ids = (uint64_t *)PDC_malloc((size_t)total_count * sizeof(uint64_t));
+        if (all_ids == NULL)
+            PGOTO_ERROR(FAIL, "Cannot allocate gathered obj_id list for home map");
+    }
+
+    {
+        uint64_t dummy = 0;
+        MPI_Allgatherv(local_count > 0 ? local_ids : &dummy, local_count, MPI_UINT64_T,
+                       total_count > 0 ? all_ids : &dummy, recvcounts, displs, MPI_UINT64_T, MPI_COMM_WORLD);
+    }
+
+    for (r = 0; r < n_new; r++) {
+        for (i = 0; i < recvcounts[r]; i++) {
+            if (rescale_map_insert(all_ids[displs[r] + i], (uint32_t)r) != SUCCEED)
+                PGOTO_ERROR(FAIL, "Failed to insert gathered ID into home map");
+        }
+    }
+#else
+    (void)n_new;
+    total_count = local_count;
+    for (i = 0; i < local_count; i++) {
+        if (rescale_map_insert(local_ids[i], 0) != SUCCEED)
+            PGOTO_ERROR(FAIL, "Failed to insert local ID into home map");
+    }
+#endif
+
+    if (pdc_server_rank_g == 0)
+        LOG_INFO("Built elastic obj_id home map with %d entries across %d ranks\n", total_count, n_new);
+
+done:
+    if (ret_value != SUCCEED)
+        PDC_Server_rescale_free_obj_id_home_map();
+    if (local_ids != NULL)
+        local_ids = (uint64_t *)PDC_free(local_ids);
+    if (all_ids != NULL)
+        all_ids = (uint64_t *)PDC_free(all_ids);
+    if (recvcounts != NULL)
+        recvcounts = (int *)PDC_free(recvcounts);
+    if (displs != NULL)
+        displs = (int *)PDC_free(displs);
+    FUNC_LEAVE(ret_value);
+}
+
+int
+PDC_Server_lookup_obj_id_home(uint64_t obj_id, uint32_t *home_out)
+{
+    FUNC_ENTER(NULL);
+
+    uint32_t *home;
+
+    if (obj_id_home_map_g == NULL || home_out == NULL)
+        FUNC_LEAVE(0);
+
+    home = (uint32_t *)hash_table_lookup(obj_id_home_map_g, &obj_id);
+    if (home == NULL)
+        FUNC_LEAVE(0);
+
+    *home_out = *home;
+    FUNC_LEAVE(1);
+}
 
 static void
 checkpoint_shard_path(char *buf, size_t buflen, int shard_rank)
@@ -1718,15 +1966,20 @@ PDC_Server_restart_elastic(int n_old, int n_new)
     if (rescale_tmp_conts_g != NULL)
         PDC_Server_rescale_free_tmp_conts();
 
+    /* Full cluster obj_id/cont_id → home map for server-side ID forwarding. */
+    ret_value = PDC_Server_rescale_build_obj_id_home_map(n_new);
+    if (ret_value != SUCCEED)
+        PGOTO_ERROR(FAIL, "Failed to build elastic obj_id home map");
+
     /* Scale-up: create missing per-rank dirs before clients attach. */
     ret_value = PDC_Server_rescale_ensure_tmp_dirs(n_new);
     if (ret_value != SUCCEED)
         PGOTO_ERROR(FAIL, "Elastic restart tmp dir setup failed");
 
-        /*
-         * Metadata tables are stable. Barrier so no rank returns early; caller
-         * (server_run) then publishes server.cfg with N_new via write_addr_to_file.
-         */
+    /*
+     * Metadata tables are stable. Barrier so no rank returns early; caller
+     * (server_run) then publishes server.cfg with N_new via write_addr_to_file.
+     */
 #ifdef ENABLE_MPI
     MPI_Barrier(MPI_COMM_WORLD);
 #endif
