@@ -319,6 +319,75 @@ PDC_Server_lookup_obj_id_home(uint64_t obj_id, uint32_t *home_out)
     FUNC_LEAVE(1);
 }
 
+/*
+ * Advance pdc_id_seq_g past any restored IDs that belong to this rank's
+ * creation-rank interval: [(rank+1)*INTERVAL, (rank+2)*INTERVAL).
+ * Foreign IDs homed here after elastic migrate do not move the sequence.
+ */
+static perr_t
+PDC_Server_rescale_recompute_id_seq(void)
+{
+    FUNC_ENTER(NULL);
+
+    perr_t            ret_value = SUCCEED;
+    uint64_t          interval  = PDC_SERVER_ID_INTERVEL;
+    uint64_t          base      = interval * (uint64_t)(pdc_server_rank_g + 1);
+    uint64_t          limit     = base + interval;
+    uint64_t          next_id   = base;
+    HashTableIterator iter;
+    HashTablePair     pair;
+    int               n_in_interval = 0;
+
+    if (metadata_hash_table_g != NULL) {
+        hash_table_iterate(metadata_hash_table_g, &iter);
+        while (hash_table_iter_has_more(&iter)) {
+            pdc_hash_table_entry_head *head;
+            pdc_metadata_t *           elt;
+
+            pair = hash_table_iter_next(&iter);
+            head = pair.value;
+            DL_FOREACH(head->metadata, elt)
+            {
+                if (elt->obj_id >= base && elt->obj_id < limit) {
+                    n_in_interval++;
+                    if (elt->obj_id + 1 > next_id)
+                        next_id = elt->obj_id + 1;
+                }
+            }
+        }
+    }
+
+    if (container_hash_table_g != NULL) {
+        hash_table_iterate(container_hash_table_g, &iter);
+        while (hash_table_iter_has_more(&iter)) {
+            pdc_cont_hash_table_entry_t *cent;
+
+            pair = hash_table_iter_next(&iter);
+            cent = pair.value;
+            if (cent->cont_id >= base && cent->cont_id < limit) {
+                n_in_interval++;
+                if (cent->cont_id + 1 > next_id)
+                    next_id = cent->cont_id + 1;
+            }
+        }
+    }
+
+    if (next_id >= limit)
+        PGOTO_ERROR(FAIL,
+                    "Rank %d ID interval exhausted after elastic restore (next=%" PRIu64 ", limit=%" PRIu64
+                    ")",
+                    pdc_server_rank_g, next_id, limit);
+
+    pdc_id_seq_g = next_id;
+
+    LOG_INFO("Rank %d recomputed pdc_id_seq_g=%" PRIu64 " after elastic restore "
+             "(%d IDs in local creation interval [%" PRIu64 ", %" PRIu64 "))\n",
+             pdc_server_rank_g, pdc_id_seq_g, n_in_interval, base, limit);
+
+done:
+    FUNC_LEAVE(ret_value);
+}
+
 static void
 checkpoint_shard_path(char *buf, size_t buflen, int shard_rank)
 {
@@ -1965,6 +2034,11 @@ PDC_Server_restart_elastic(int n_old, int n_new)
     /* Containers now live in container_hash_table_g — do not free HT-owned entries. */
     if (rescale_tmp_conts_g != NULL)
         PDC_Server_rescale_free_tmp_conts();
+
+    /* New creates must not reuse IDs from this rank's interval after restore. */
+    ret_value = PDC_Server_rescale_recompute_id_seq();
+    if (ret_value != SUCCEED)
+        PGOTO_ERROR(FAIL, "Failed to recompute pdc_id_seq_g after elastic migrate");
 
     /* Full cluster obj_id/cont_id → home map for server-side ID forwarding. */
     ret_value = PDC_Server_rescale_build_obj_id_home_map(n_new);
