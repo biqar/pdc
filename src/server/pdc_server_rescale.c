@@ -365,15 +365,15 @@ PDC_Server_publish_obj_id_home_map(int n_new)
 {
     FUNC_ENTER(NULL);
 
-    perr_t                 ret_value  = SUCCEED;
-    char                   map_fname[ADDR_MAX];
-    FILE *                 fp         = NULL;
-    pdc_obj_id_home_hdr_t  hdr;
-    pdc_obj_id_home_rec_t  rec;
-    HashTableIterator      iter;
-    HashTablePair          pair;
-    unsigned int           n_entries  = 0;
-    unsigned int           written    = 0;
+    perr_t                ret_value = SUCCEED;
+    char                  map_fname[ADDR_MAX];
+    FILE *                fp = NULL;
+    pdc_obj_id_home_hdr_t hdr;
+    pdc_obj_id_home_rec_t rec;
+    HashTableIterator     iter;
+    HashTablePair         pair;
+    unsigned int          n_entries = 0;
+    unsigned int          written   = 0;
 
     if (n_new <= 0)
         PGOTO_ERROR(FAIL, "Invalid n_new=%d for publishing obj_id home map", n_new);

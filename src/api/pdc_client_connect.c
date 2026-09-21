@@ -445,8 +445,7 @@ PDC_Client_read_server_addr_from_file()
 
     /* Optional elastic sidecar; missing file is normal for same-N / fresh servers. */
     if (PDC_Client_load_obj_id_home_map_from_tmpdir() != SUCCEED)
-        LOG_WARNING("Failed to load %s; ID-based routing uses legacy formula\n",
-                    pdc_obj_id_home_map_name_g);
+        LOG_WARNING("Failed to load %s; ID-based routing uses legacy formula\n", pdc_obj_id_home_map_name_g);
 
     ret_value = SUCCEED;
 
@@ -467,7 +466,7 @@ PDC_Client_load_obj_id_home_map_from_tmpdir(void)
 
     perr_t                 ret_value = SUCCEED;
     char                   map_fname[PATH_MAX];
-    FILE *                 fp        = NULL;
+    FILE *                 fp = NULL;
     pdc_obj_id_home_hdr_t  hdr;
     pdc_obj_id_home_rec_t *recs      = NULL;
     uint64_t               n_entries = 0;
@@ -490,8 +489,7 @@ PDC_Client_load_obj_id_home_map_from_tmpdir(void)
                 LOG_WARNING("Incomplete header in [%s]; ignoring map\n", map_fname);
                 have_map = 0;
             }
-            else if (hdr.magic != PDC_OBJ_ID_HOME_MAP_MAGIC ||
-                     hdr.version != PDC_OBJ_ID_HOME_MAP_VERSION) {
+            else if (hdr.magic != PDC_OBJ_ID_HOME_MAP_MAGIC || hdr.version != PDC_OBJ_ID_HOME_MAP_VERSION) {
                 LOG_WARNING("Unsupported obj_id home map magic/version in [%s]; ignoring\n", map_fname);
                 have_map = 0;
             }

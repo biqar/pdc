@@ -2489,9 +2489,9 @@ transform_and_region_release_bulk_transfer_cb(const struct hg_cb_info *hg_cb_inf
     if (remote_reg_info == NULL)
         PGOTO_ERROR(HG_OTHER_ERROR, "remote_reg_info memory allocation failed");
 
-    remote_reg_info->ndim        = (bulk_args->remote_region).ndim;
-    remote_reg_info->offset      = (uint64_t *)PDC_malloc(sizeof(uint64_t));
-    remote_reg_info->size        = (uint64_t *)PDC_malloc(sizeof(uint64_t));
+    remote_reg_info->ndim = (bulk_args->remote_region).ndim;
+    remote_reg_info->offset = (uint64_t *)PDC_malloc(sizeof(uint64_t));
+    remote_reg_info->size = (uint64_t *)PDC_malloc(sizeof(uint64_t));
     (remote_reg_info->offset)[0] = (bulk_args->remote_region).start[0];
     if (use_transform_size)
         (remote_reg_info->size)[0] = transform_size;
@@ -2732,9 +2732,9 @@ buf_map_region_release_bulk_transfer_cb(const struct hg_cb_info *hg_cb_info)
     if (remote_reg_info == NULL)
         PGOTO_ERROR(HG_OTHER_ERROR, "remote_reg_info memory allocation failed");
 
-    remote_reg_info->ndim   = (bulk_args->remote_region_nounit).ndim;
+    remote_reg_info->ndim = (bulk_args->remote_region_nounit).ndim;
     remote_reg_info->offset = (uint64_t *)PDC_malloc(remote_reg_info->ndim * sizeof(uint64_t));
-    remote_reg_info->size   = (uint64_t *)PDC_malloc(remote_reg_info->ndim * sizeof(uint64_t));
+    remote_reg_info->size = (uint64_t *)PDC_malloc(remote_reg_info->ndim * sizeof(uint64_t));
 
     PDC_copy_region_desc(bulk_args->remote_region_nounit.start, remote_reg_info->offset,
                          remote_reg_info->ndim, remote_reg_info->ndim);
@@ -3034,7 +3034,7 @@ HG_TEST_RPC_CB(region_release, handle)
                         PDC_Server_transfer_request_io(obj_map_bulk_args->remote_obj_id, 0, NULL,
                                                        remote_reg_info, data_buf, in.data_unit, 0);
 #endif
-                        size  = HG_Bulk_get_size(eltt2->local_bulk_handle);
+                        size = HG_Bulk_get_size(eltt2->local_bulk_handle);
                         size2 = HG_Bulk_get_size(remote_bulk_handle);
                         if (size != size2) {
                             error = 1;
@@ -5460,7 +5460,7 @@ PDC_add_task_to_list(pdc_task_list_t **target_list, perr_t (*cb)(), void *cb_arg
 #ifdef ENABLE_MULTITHREAD
                      void *_mutex)
 #else
-                     void *_mutex    ATTRIBUTE(unused))
+                     void *_mutex ATTRIBUTE(unused))
 #endif
 {
     FUNC_ENTER(NULL);
@@ -5503,7 +5503,7 @@ PDC_del_task_from_list(pdc_task_list_t **target_list, pdc_task_list_t *del,
 #ifdef ENABLE_MULTITHREAD
                        void *_mutex)
 #else
-                       void *_mutex  ATTRIBUTE(unused))
+                       void *_mutex ATTRIBUTE(unused))
 #endif
 {
     FUNC_ENTER(NULL);
