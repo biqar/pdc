@@ -36,6 +36,9 @@
  * barriers before returning so the caller can publish server.cfg only after
  * metadata is ready.
  *
+ * When built with PDC_ENABLE_IDIOMS, elastic restart is refused (index shards
+ * are not repartitioned with metadata); same-N restart still recovers IDIOMS.
+ *
  * \param n_old [IN] Server count at checkpoint time
  * \param n_new [IN] Current server MPI size
  *

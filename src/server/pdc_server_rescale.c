@@ -2642,6 +2642,15 @@ PDC_Server_restart_elastic(int n_old, int n_new)
     if (n_old > 65536 || n_new > 65536)
         PGOTO_ERROR(FAIL, "Server count out of range for elastic restart (n_old=%d, n_new=%d)", n_old, n_new);
 
+#ifdef PDC_ENABLE_IDIOMS
+    /* Index shards assume fixed N; do not migrate or recover under N_new until rebuild exists. */
+    PGOTO_ERROR(FAIL,
+                "Elastic server-count restart (%d -> %d) is not supported when IDIOMS is enabled; "
+                "restart with the same server count, or rebuild without PDC_ENABLE_IDIOMS until "
+                "IDIOMS index rebuild after metadata migration is implemented",
+                n_old, n_new);
+#endif
+
     if (pdc_server_rank_g == 0)
         LOG_INFO("Elastic server restart requested: %d -> %d\n", n_old, n_new);
 

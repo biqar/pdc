@@ -1003,6 +1003,7 @@ drc_access_again:
 #endif
         }
         else {
+            /* IDIOMS: restart_elastic refuses when PDC_ENABLE_IDIOMS; no index recover here. */
             ret_value = PDC_Server_restart_elastic((int)n_old, pdc_server_size_g);
             if (ret_value != SUCCEED)
                 PGOTO_ERROR(FAIL, "Error with PDC_Server_restart_elastic (%u -> %d)", n_old,
