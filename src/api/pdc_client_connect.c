@@ -365,6 +365,8 @@ PDC_Client_wait_pthread_progress()
     FUNC_LEAVE_VOID();
 }
 
+static perr_t PDC_Client_load_obj_id_home_map_from_tmpdir(void);
+
 perr_t
 PDC_Client_read_server_addr_from_file()
 {
@@ -438,11 +440,129 @@ PDC_Client_read_server_addr_from_file()
 
     if (pdc_client_mpi_rank_g == 0) {
         fclose(na_config);
+        na_config = NULL;
     }
+
+    /* Optional elastic sidecar; missing file is normal for same-N / fresh servers. */
+    if (PDC_Client_load_obj_id_home_map_from_tmpdir() != SUCCEED)
+        LOG_WARNING("Failed to load %s; ID-based routing uses legacy formula\n",
+                    pdc_obj_id_home_map_name_g);
 
     ret_value = SUCCEED;
 
 done:
+    if (na_config != NULL)
+        fclose(na_config);
+    FUNC_LEAVE(ret_value);
+}
+
+/*
+ * Rank 0 reads obj_id_home_map.bin (if present); all ranks install a local HT.
+ * Missing file → clear map and succeed.
+ */
+static perr_t
+PDC_Client_load_obj_id_home_map_from_tmpdir(void)
+{
+    FUNC_ENTER(NULL);
+
+    perr_t                 ret_value = SUCCEED;
+    char                   map_fname[PATH_MAX];
+    FILE *                 fp        = NULL;
+    pdc_obj_id_home_hdr_t  hdr;
+    pdc_obj_id_home_rec_t *recs      = NULL;
+    uint64_t               n_entries = 0;
+    int                    have_map  = 0;
+    size_t                 nbytes;
+
+    memset(&hdr, 0, sizeof(hdr));
+
+    if (pdc_client_mpi_rank_g == 0) {
+        if (strpbrk(pdc_client_tmp_dir_g, ";&|`$<>") != NULL)
+            PGOTO_ERROR(FAIL, "Invalid characters in PDC client tmp dir");
+
+        snprintf(map_fname, PATH_MAX, "%s/%s", pdc_client_tmp_dir_g, pdc_obj_id_home_map_name_g);
+        fp = fopen(map_fname, "rb");
+        if (fp == NULL) {
+            have_map = 0;
+        }
+        else {
+            if (fread(&hdr, sizeof(hdr), 1, fp) != 1) {
+                LOG_WARNING("Incomplete header in [%s]; ignoring map\n", map_fname);
+                have_map = 0;
+            }
+            else if (hdr.magic != PDC_OBJ_ID_HOME_MAP_MAGIC ||
+                     hdr.version != PDC_OBJ_ID_HOME_MAP_VERSION) {
+                LOG_WARNING("Unsupported obj_id home map magic/version in [%s]; ignoring\n", map_fname);
+                have_map = 0;
+            }
+            else if (hdr.n_server != (uint32_t)pdc_server_num_g) {
+                LOG_WARNING("obj_id home map n_server=%u != client view %d; ignoring\n", hdr.n_server,
+                            pdc_server_num_g);
+                have_map = 0;
+            }
+            else if (hdr.n_entries > (uint64_t)100000000ULL) {
+                LOG_WARNING("obj_id home map n_entries too large (%" PRIu64 "); ignoring\n", hdr.n_entries);
+                have_map = 0;
+            }
+            else {
+                n_entries = hdr.n_entries;
+                if (n_entries > 0) {
+                    nbytes = (size_t)n_entries * sizeof(pdc_obj_id_home_rec_t);
+                    recs   = (pdc_obj_id_home_rec_t *)PDC_malloc(nbytes);
+                    if (recs == NULL)
+                        PGOTO_ERROR(FAIL, "Cannot allocate obj_id home map records");
+                    if (fread(recs, sizeof(pdc_obj_id_home_rec_t), (size_t)n_entries, fp) !=
+                        (size_t)n_entries) {
+                        LOG_WARNING("Incomplete records in [%s]; ignoring map\n", map_fname);
+                        recs      = (pdc_obj_id_home_rec_t *)PDC_free(recs);
+                        n_entries = 0;
+                        have_map  = 0;
+                    }
+                    else {
+                        have_map = 1;
+                    }
+                }
+                else {
+                    have_map = 1;
+                }
+            }
+            fclose(fp);
+            fp = NULL;
+        }
+    }
+
+#ifdef ENABLE_MPI
+    MPI_Bcast(&have_map, 1, MPI_INT, 0, PDC_CLIENT_COMM_WORLD_g);
+    MPI_Bcast(&n_entries, 1, MPI_UINT64_T, 0, PDC_CLIENT_COMM_WORLD_g);
+    if (have_map && n_entries > 0) {
+        if (pdc_client_mpi_rank_g != 0) {
+            nbytes = (size_t)n_entries * sizeof(pdc_obj_id_home_rec_t);
+            recs   = (pdc_obj_id_home_rec_t *)PDC_malloc(nbytes);
+            if (recs == NULL)
+                PGOTO_ERROR(FAIL, "Cannot allocate obj_id home map records on non-root");
+        }
+        MPI_Bcast(recs, (int)(n_entries * sizeof(pdc_obj_id_home_rec_t)), MPI_BYTE, 0,
+                  PDC_CLIENT_COMM_WORLD_g);
+    }
+#endif
+
+    if (!have_map) {
+        PDC_Client_clear_obj_id_home_map();
+        PGOTO_DONE(SUCCEED);
+    }
+
+    ret_value = PDC_Client_install_obj_id_home_map((uint32_t)pdc_server_num_g, n_entries, recs);
+    if (ret_value != SUCCEED)
+        PGOTO_ERROR(FAIL, "Failed to install client obj_id home map");
+
+    if (pdc_client_mpi_rank_g == 0 && n_entries > 0)
+        LOG_INFO("Loaded %s with %" PRIu64 " entries\n", pdc_obj_id_home_map_name_g, n_entries);
+
+done:
+    if (fp != NULL)
+        fclose(fp);
+    if (recs != NULL)
+        recs = (pdc_obj_id_home_rec_t *)PDC_free(recs);
     FUNC_LEAVE(ret_value);
 }
 
@@ -1608,6 +1728,8 @@ PDC_Client_finalize()
 
     if (pdc_server_info_g != NULL)
         pdc_server_info_g = (struct _pdc_server_info *)PDC_free(pdc_server_info_g);
+
+    PDC_Client_clear_obj_id_home_map();
 
     // Terminate thread
     if (hg_progress_flag_g == 0) {

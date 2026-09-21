@@ -338,6 +338,98 @@ PDC_Server_lookup_obj_id_home(uint64_t obj_id, uint32_t *home_out)
     FUNC_LEAVE(1);
 }
 
+perr_t
+PDC_Server_unpublish_obj_id_home_map(void)
+{
+    FUNC_ENTER(NULL);
+
+    perr_t ret_value = SUCCEED;
+    char   map_fname[ADDR_MAX];
+
+    if (pdc_server_rank_g != 0)
+        PGOTO_DONE(SUCCEED);
+
+    if (strpbrk(pdc_server_tmp_dir_g, ";&|`$<>") != NULL)
+        PGOTO_ERROR(FAIL, "Invalid characters in server tmp dir path");
+
+    snprintf(map_fname, ADDR_MAX, "%s%s", pdc_server_tmp_dir_g, pdc_obj_id_home_map_name_g);
+    if (remove(map_fname) != 0 && errno != ENOENT)
+        PGOTO_ERROR(FAIL, "Unable to remove stale obj_id home map [%s]: %s", map_fname, strerror(errno));
+
+done:
+    FUNC_LEAVE(ret_value);
+}
+
+perr_t
+PDC_Server_publish_obj_id_home_map(int n_new)
+{
+    FUNC_ENTER(NULL);
+
+    perr_t                 ret_value  = SUCCEED;
+    char                   map_fname[ADDR_MAX];
+    FILE *                 fp         = NULL;
+    pdc_obj_id_home_hdr_t  hdr;
+    pdc_obj_id_home_rec_t  rec;
+    HashTableIterator      iter;
+    HashTablePair          pair;
+    unsigned int           n_entries  = 0;
+    unsigned int           written    = 0;
+
+    if (n_new <= 0)
+        PGOTO_ERROR(FAIL, "Invalid n_new=%d for publishing obj_id home map", n_new);
+
+    if (pdc_server_rank_g != 0)
+        PGOTO_DONE(SUCCEED);
+
+    if (obj_id_home_map_g == NULL)
+        PGOTO_ERROR(FAIL, "Cannot publish obj_id home map: map not built");
+
+    if (strpbrk(pdc_server_tmp_dir_g, ";&|`$<>") != NULL)
+        PGOTO_ERROR(FAIL, "Invalid characters in server tmp dir path");
+
+    n_entries = hash_table_num_entries(obj_id_home_map_g);
+
+    snprintf(map_fname, ADDR_MAX, "%s%s", pdc_server_tmp_dir_g, pdc_obj_id_home_map_name_g);
+    fp = fopen(map_fname, "wb");
+    if (fp == NULL)
+        PGOTO_ERROR(FAIL, "Cannot open obj_id home map for write [%s]: %s", map_fname, strerror(errno));
+
+    memset(&hdr, 0, sizeof(hdr));
+    hdr.magic     = PDC_OBJ_ID_HOME_MAP_MAGIC;
+    hdr.version   = PDC_OBJ_ID_HOME_MAP_VERSION;
+    hdr.n_server  = (uint32_t)n_new;
+    hdr.n_entries = (uint64_t)n_entries;
+
+    if (fwrite(&hdr, sizeof(hdr), 1, fp) != 1)
+        PGOTO_ERROR(FAIL, "Failed writing obj_id home map header to [%s]", map_fname);
+
+    hash_table_iterate(obj_id_home_map_g, &iter);
+    while (hash_table_iter_has_more(&iter)) {
+        pair = hash_table_iter_next(&iter);
+        memset(&rec, 0, sizeof(rec));
+        rec.id   = *((uint64_t *)pair.key);
+        rec.home = *((uint32_t *)pair.value);
+        if (fwrite(&rec, sizeof(rec), 1, fp) != 1)
+            PGOTO_ERROR(FAIL, "Failed writing obj_id home map record to [%s]", map_fname);
+        written++;
+    }
+
+    if (written != n_entries)
+        PGOTO_ERROR(FAIL, "obj_id home map write count mismatch (%u vs %u)", written, n_entries);
+
+    if (fflush(fp) != 0)
+        PGOTO_ERROR(FAIL, "fflush failed for obj_id home map [%s]", map_fname);
+
+    LOG_INFO("Published %s with %u entries (n_server=%d)\n", pdc_obj_id_home_map_name_g, n_entries, n_new);
+
+done:
+    if (fp != NULL)
+        fclose(fp);
+    if (ret_value != SUCCEED && pdc_server_rank_g == 0)
+        (void)PDC_Server_unpublish_obj_id_home_map();
+    FUNC_LEAVE(ret_value);
+}
+
 /*
  * Advance pdc_id_seq_g past any restored IDs that belong to this rank's
  * creation-rank interval: [(rank+1)*INTERVAL, (rank+2)*INTERVAL).
@@ -2663,6 +2755,9 @@ PDC_Server_restart_elastic(int n_old, int n_new)
     ret_value = PDC_Server_rescale_unpublish_server_cfg();
     if (ret_value != SUCCEED)
         PGOTO_ERROR(FAIL, "Failed to unpublish stale server.cfg before elastic migrate");
+    ret_value = PDC_Server_unpublish_obj_id_home_map();
+    if (ret_value != SUCCEED)
+        PGOTO_ERROR(FAIL, "Failed to unpublish stale obj_id home map before elastic migrate");
 #ifdef ENABLE_MPI
     MPI_Barrier(MPI_COMM_WORLD);
 #endif
@@ -2713,6 +2808,14 @@ PDC_Server_restart_elastic(int n_old, int n_new)
     ret_value = PDC_Server_rescale_build_obj_id_home_map(n_new);
     if (ret_value != SUCCEED)
         PGOTO_ERROR(FAIL, "Failed to build elastic obj_id home map");
+
+    /* Client-visible sidecar before server.cfg so connect can load the map. */
+    ret_value = PDC_Server_publish_obj_id_home_map(n_new);
+    if (ret_value != SUCCEED)
+        PGOTO_ERROR(FAIL, "Failed to publish elastic obj_id home map");
+#ifdef ENABLE_MPI
+    MPI_Barrier(MPI_COMM_WORLD);
+#endif
 
     /* Transfer-query: migrate to metadata homes, remap data_server_id, install. */
     ret_value = PDC_Server_rescale_migrate_transfer_query(n_new);

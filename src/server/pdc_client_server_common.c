@@ -40,6 +40,8 @@
 
 #ifdef IS_PDC_SERVER
 #include "pdc_server_rescale.h"
+#else
+#include "pdc_hash_table.h"
 #endif
 
 #include <stdio.h>
@@ -214,6 +216,123 @@ PDC_get_local_server_id(int my_rank, int n_client_per_server, int n_server)
     FUNC_LEAVE(ret_value);
 }
 
+#ifndef IS_PDC_SERVER
+/* Client session map loaded from obj_id_home_map.bin after elastic restart. */
+static HashTable *client_obj_id_home_map_g = NULL;
+
+static unsigned int
+client_obj_id_hash(HashTableKey vlocation)
+{
+    FUNC_ENTER(NULL);
+
+    uint64_t v = *((uint64_t *)vlocation);
+
+    FUNC_LEAVE((unsigned int)(v ^ (v >> 32)));
+}
+
+static int
+client_obj_id_equal(HashTableKey vlocation1, HashTableKey vlocation2)
+{
+    FUNC_ENTER(NULL);
+    FUNC_LEAVE(*((uint64_t *)vlocation1) == *((uint64_t *)vlocation2));
+}
+
+static void
+client_obj_id_key_free(HashTableKey key)
+{
+    FUNC_ENTER(NULL);
+    key = (HashTableKey)PDC_free((uint64_t *)key);
+    FUNC_LEAVE_VOID();
+}
+
+static void
+client_obj_id_value_free(HashTableValue value)
+{
+    FUNC_ENTER(NULL);
+    value = (HashTableValue)PDC_free((uint32_t *)value);
+    FUNC_LEAVE_VOID();
+}
+
+void
+PDC_Client_clear_obj_id_home_map(void)
+{
+    FUNC_ENTER(NULL);
+
+    if (client_obj_id_home_map_g != NULL) {
+        hash_table_free(client_obj_id_home_map_g);
+        client_obj_id_home_map_g = NULL;
+    }
+
+    FUNC_LEAVE_VOID();
+}
+
+perr_t
+PDC_Client_install_obj_id_home_map(uint32_t n_server, uint64_t n_entries, const pdc_obj_id_home_rec_t *recs)
+{
+    FUNC_ENTER(NULL);
+
+    perr_t    ret_value = SUCCEED;
+    uint64_t  i;
+    uint64_t *key = NULL;
+    uint32_t *val = NULL;
+
+    (void)n_server;
+
+    PDC_Client_clear_obj_id_home_map();
+
+    if (n_entries == 0 || recs == NULL)
+        PGOTO_DONE(SUCCEED);
+
+    client_obj_id_home_map_g = hash_table_new(client_obj_id_hash, client_obj_id_equal);
+    if (client_obj_id_home_map_g == NULL)
+        PGOTO_ERROR(FAIL, "Cannot create client obj_id home map");
+    hash_table_register_free_functions(client_obj_id_home_map_g, client_obj_id_key_free,
+                                       client_obj_id_value_free);
+
+    for (i = 0; i < n_entries; i++) {
+        key = (uint64_t *)PDC_malloc(sizeof(uint64_t));
+        val = (uint32_t *)PDC_malloc(sizeof(uint32_t));
+        if (key == NULL || val == NULL)
+            PGOTO_ERROR(FAIL, "Cannot allocate client obj_id home map entry");
+        *key = recs[i].id;
+        *val = recs[i].home;
+        if (hash_table_insert(client_obj_id_home_map_g, key, val) != 1)
+            PGOTO_ERROR(FAIL, "Failed to insert client obj_id %" PRIu64 " -> home %u", recs[i].id,
+                        recs[i].home);
+        key = NULL;
+        val = NULL;
+    }
+
+done:
+    if (ret_value != SUCCEED) {
+        if (key != NULL)
+            key = (uint64_t *)PDC_free(key);
+        if (val != NULL)
+            val = (uint32_t *)PDC_free(val);
+        PDC_Client_clear_obj_id_home_map();
+    }
+    FUNC_LEAVE(ret_value);
+}
+
+int
+PDC_Client_lookup_obj_id_home(uint64_t obj_id, uint32_t *home_out)
+{
+    FUNC_ENTER(NULL);
+
+    uint32_t *home;
+
+    if (client_obj_id_home_map_g == NULL || home_out == NULL)
+        FUNC_LEAVE(0);
+
+    home = (uint32_t *)hash_table_lookup(client_obj_id_home_map_g, &obj_id);
+    if (home == NULL)
+        FUNC_LEAVE(0);
+
+    *home_out = *home;
+    FUNC_LEAVE(1);
+}
+#endif /* !IS_PDC_SERVER */
+
 uint32_t
 PDC_get_server_by_obj_id(uint64_t obj_id, int n_server)
 {
@@ -231,6 +350,20 @@ PDC_get_server_by_obj_id(uint64_t obj_id, int n_server)
         uint32_t home = 0;
 
         if (PDC_Server_lookup_obj_id_home(obj_id, &home)) {
+            if (n_server > 0)
+                home %= (uint32_t)n_server;
+            FUNC_LEAVE(home);
+        }
+    }
+#else
+    /*
+     * Client: consult sidecar map loaded at connect after elastic restart.
+     * Absent map or miss → legacy creation-rank formula.
+     */
+    {
+        uint32_t home = 0;
+
+        if (PDC_Client_lookup_obj_id_home(obj_id, &home)) {
             if (n_server > 0)
                 home %= (uint32_t)n_server;
             FUNC_LEAVE(home);

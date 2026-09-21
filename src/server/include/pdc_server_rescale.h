@@ -60,4 +60,15 @@ perr_t PDC_Server_restart_elastic(int n_old, int n_new);
  */
 int PDC_Server_lookup_obj_id_home(uint64_t obj_id, uint32_t *home_out);
 
+/**
+ * Write obj_id_home_map.bin next to server.cfg from the in-memory elastic map.
+ * Rank 0 only performs I/O; call after the map is built and before server.cfg publish.
+ */
+perr_t PDC_Server_publish_obj_id_home_map(int n_new);
+
+/**
+ * Remove obj_id_home_map.bin if present (same-N / fresh start / pre-elastic cleanup).
+ */
+perr_t PDC_Server_unpublish_obj_id_home_map(void);
+
 #endif /* PDC_SERVER_RESCALE_H */

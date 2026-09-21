@@ -995,6 +995,9 @@ drc_access_again:
             PGOTO_ERROR(FAIL, "Failed to read checkpoint_server_count from [%s]", probe_file);
 
         if (n_old == (uint32_t)pdc_server_size_g) {
+            /* Same-N: drop any leftover elastic client map from a prior session. */
+            if (PDC_Server_unpublish_obj_id_home_map() != SUCCEED)
+                PGOTO_ERROR(FAIL, "Failed to remove stale obj_id home map before same-N restart");
             ret_value = PDC_Server_restart(checkpoint_file);
             if (ret_value != SUCCEED)
                 PGOTO_ERROR(FAIL, "Error with PDC_Server_restart");
@@ -1012,6 +1015,9 @@ drc_access_again:
         }
     }
     else {
+        /* Fresh start: no elastic client map. */
+        if (PDC_Server_unpublish_obj_id_home_map() != SUCCEED)
+            PGOTO_ERROR(FAIL, "Failed to remove stale obj_id home map on fresh start");
         // We are starting a brand new server
         transfer_request_metadata_query_init_bulki(pdc_server_size_g, NULL);
         if (is_hash_table_init_g != 1) {
